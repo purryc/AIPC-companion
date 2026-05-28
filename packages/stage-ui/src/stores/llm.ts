@@ -82,9 +82,11 @@ export const useLLM = defineStore('llm', () => {
       await runStream()
     }
     catch (err) {
-      if (isToolRelatedError(err)) {
+      if (isToolRelatedError(err) && toolsCompatibility.value.get(key) !== false) {
         console.warn(`[llm] Auto-disabling tools for "${key}" due to tool-related error`)
         toolsCompatibility.value.set(key, false)
+        await runStream()
+        return
       }
       // NOTICE:
       // Auto-degrade content-part arrays to plain strings on the next attempt

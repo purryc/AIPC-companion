@@ -87,6 +87,7 @@ describe('isToolRelatedError', () => {
     ['openai-compatible', 'Invalid schema for function \'myFunc\': \'dict\' is not valid under any of the given schemas'],
     ['openai-compatible', 'invalid_function_parameters'],
     ['openai-compatible', 'invalid function parameters'],
+    ['google-openrouter', 'Provider returned error {"error":{"message":"GenerateContentRequest.tools[0].function_declarations[1].parameters.properties[contexts].any_of[0].items.properties[metadata].any_of[0].items.required[0]: property is not defined","status":"INVALID_ARGUMENT"},"provider_name":"Google AI Studio"}'],
     ['azure', 'Functions are not supported at this time'],
     ['azure', 'Unrecognized request argument supplied: tools'],
     ['azure', 'Unrecognized request arguments supplied: tool_choice, tools'],
@@ -218,6 +219,30 @@ describe('isToolRelatedError', () => {
     const secondCallTools = streamTextMock.mock.calls[1]?.[0]?.tools
     expect(Array.isArray(secondCallTools)).toBe(true)
     expect(secondCallTools?.map(toolNameFrom)).toContain('runtime_play_chess_match')
+  })
+
+  it('retries once without tools when the provider rejects tool schemas before streaming starts', async () => {
+    const store = useLLM()
+    const customTool = { name: 'custom-tool' } as any
+
+    streamTextMock
+      .mockImplementationOnce(() => {
+        throw new Error('Provider returned error {"error":{"message":"GenerateContentRequest.tools[0].function_declarations[1].parameters.properties[contexts].any_of[0].items.properties[metadata].any_of[0].items.required[0]: property is not defined","status":"INVALID_ARGUMENT"},"provider_name":"Google AI Studio"}')
+      })
+      .mockImplementationOnce((options: { onEvent: (event: unknown) => Promise<void>, tools?: unknown[] }) => {
+        queueMicrotask(async () => {
+          await options.onEvent({ type: 'finish', finishReason: 'stop' })
+        })
+        return createMockStreamResult()
+      })
+
+    await expect(store.stream('model-a', provider, [{ role: 'user', content: 'hello' }] as Message[], {
+      tools: [customTool],
+    })).resolves.toBeUndefined()
+
+    expect(streamTextMock).toHaveBeenCalledTimes(2)
+    expect(streamTextMock.mock.calls[0]?.[0]?.tools).toEqual(expect.any(Array))
+    expect(streamTextMock.mock.calls[1]?.[0]?.tools).toBeUndefined()
   })
 
   it('merges runtime-registered tools from the llm-tools store into the builtin tool resolver', async () => {

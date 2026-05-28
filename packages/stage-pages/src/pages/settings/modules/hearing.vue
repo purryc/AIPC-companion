@@ -735,7 +735,7 @@ onUnmounted(() => {
           </div>
         </h2>
 
-        <ErrorContainer v-if="error" title="Error occurred" :error="error" mb-4 />
+        <ErrorContainer v-if="error" title="Transcription failed" :error="error" mb-4 />
 
         <Button class="mb-4" w-full @click="toggleMonitoring">
           {{ isMonitoring ? 'Stop Monitoring' : 'Start Monitoring' }}

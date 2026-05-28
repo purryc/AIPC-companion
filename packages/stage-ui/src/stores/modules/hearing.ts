@@ -19,13 +19,136 @@ import { useProvidersStore } from '../providers'
 import { streamAliyunTranscription } from '../providers/aliyun/stream-transcription'
 import { streamWebSpeechAPITranscription } from '../providers/web-speech-api'
 
-function errorMessage(err: unknown): string {
-  const msg = errorMessageFrom(err) ?? String(err)
-  // Browsers hide the real reason (CORS, timeout, DNS, …) behind this generic string.
-  if (msg === 'Failed to fetch' || msg === 'Load failed') {
-    return `${msg} — check the browser console (Network tab) for the exact reason (e.g. CORS, network timeout, DNS failure).`
+export interface HearingErrorContext {
+  providerId?: string
+  model?: string
+  recording?: Blob | File | null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function safeStringifyError(value: unknown): string | undefined {
+  const seen = new WeakSet<object>()
+
+  try {
+    return JSON.stringify(
+      value,
+      (key, currentValue) => {
+        if (/api[-_]?key|authorization|password|secret|token/i.test(key))
+          return '[redacted]'
+
+        if (typeof currentValue === 'bigint')
+          return currentValue.toString()
+
+        if (typeof currentValue === 'function')
+          return undefined
+
+        if (typeof currentValue === 'object' && currentValue !== null) {
+          if (seen.has(currentValue))
+            return '[circular]'
+          seen.add(currentValue)
+        }
+
+        return currentValue
+      },
+      2,
+    )
   }
-  return msg
+  catch {
+    return undefined
+  }
+}
+
+function errorDetailsFrom(err: unknown): string | undefined {
+  if (!isRecord(err))
+    return undefined
+
+  const details: Record<string, unknown> = {}
+
+  for (const key of [
+    'name',
+    'code',
+    'status',
+    'statusCode',
+    'type',
+    'provider',
+    'provider_name',
+    'param',
+    'cause',
+    'response',
+    'data',
+    'body',
+    'raw',
+    'error',
+  ]) {
+    if (key in err && err[key] != null)
+      details[key] = err[key]
+  }
+
+  for (const [key, value] of Object.entries(err)) {
+    if (!(key in details) && value != null)
+      details[key] = value
+  }
+
+  if (Object.keys(details).length === 0)
+    return undefined
+
+  return safeStringifyError(details)
+}
+
+function messageFromPlainObject(err: unknown): string | undefined {
+  if (!isRecord(err) || typeof err.message !== 'string' || !err.message.trim())
+    return undefined
+
+  return err.message
+}
+
+function errorContextFrom(context?: HearingErrorContext): string | undefined {
+  if (!context)
+    return undefined
+
+  const lines: string[] = []
+  if (context.providerId)
+    lines.push(`provider: ${context.providerId}`)
+  if (context.model)
+    lines.push(`model: ${context.model}`)
+  if (context.recording) {
+    lines.push(`recording: ${context.recording.size} bytes${context.recording.type ? `, ${context.recording.type}` : ''}`)
+  }
+
+  return lines.length > 0 ? lines.join('\n') : undefined
+}
+
+export function hearingErrorMessage(err: unknown, context?: HearingErrorContext): string {
+  let msg: string
+
+  if (typeof err === 'number') {
+    msg = `Transcription failed with numeric error code ${err}. AIRI received a raw code instead of a readable provider error.`
+  }
+  else if (typeof err === 'bigint') {
+    msg = `Transcription failed with numeric error code ${err.toString()}. AIRI received a raw code instead of a readable provider error.`
+  }
+  else if (typeof err === 'string') {
+    msg = err
+  }
+  else {
+    msg = errorMessageFrom(err) ?? messageFromPlainObject(err) ?? safeStringifyError(err) ?? String(err)
+  }
+
+  // Browsers hide the real reason (CORS, timeout, DNS, ...) behind this generic string.
+  if (msg === 'Failed to fetch' || msg === 'Load failed') {
+    msg = `${msg} - check the browser console (Network tab) for the exact reason (for example CORS, network timeout, or DNS failure).`
+  }
+
+  const details = errorDetailsFrom(err)
+  const errorContext = errorContextFrom(context)
+  return [
+    msg,
+    details ? `Details:\n${details}` : undefined,
+    errorContext ? `Context:\n${errorContext}` : undefined,
+  ].filter(Boolean).join('\n\n')
 }
 
 // NOTICE: Realtime transcription intentionally uses `AbortError` as a control-flow signal when the
@@ -470,8 +593,11 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
           if (isExpectedStreamStopError(err))
             return
 
-          error.value = errorMessage(err)
-          console.error('Error getting transcription result:', error.value)
+          error.value = hearingErrorMessage(err, {
+            providerId: session.providerId,
+            model: activeTranscriptionModel.value,
+          })
+          console.error('Error getting transcription result:', error.value, err)
         }
       }
 
@@ -518,8 +644,11 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
         if (isExpectedStreamStopError(err))
           return
 
-        error.value = errorMessage(err)
-        console.error('Error generating transcription:', error.value)
+        error.value = hearingErrorMessage(err, {
+          providerId: session.providerId,
+          model: activeTranscriptionModel.value,
+        })
+        console.error('Error generating transcription:', error.value, err)
       }
     }
 
@@ -853,8 +982,11 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
       if (isExpectedStreamStopError(err))
         return
 
-      error.value = errorMessage(err)
-      console.error('Error generating transcription:', error.value)
+      error.value = hearingErrorMessage(err, {
+        providerId: activeTranscriptionProvider.value,
+        model: activeTranscriptionModel.value,
+      })
+      console.error('Error generating transcription:', error.value, err)
     }
   }
 
@@ -874,11 +1006,12 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
 
         // Get model from configuration or use default
         const model = activeTranscriptionModel.value
+        const recordingFile = new File([recording], 'recording.wav', { type: recording.type || 'audio/wav' })
         const result = await hearingStore.transcription(
           providerId,
           provider,
           model,
-          new File([recording], 'recording.wav'),
+          recordingFile,
         )
         const text = result.mode === 'stream' ? await result.text : result.text
         if (!text || !text.trim()) {
@@ -890,8 +1023,12 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
       }
     }
     catch (err) {
-      error.value = errorMessage(err)
-      console.error('Error generating transcription:', error.value)
+      error.value = hearingErrorMessage(err, {
+        providerId: activeTranscriptionProvider.value,
+        model: activeTranscriptionModel.value,
+        recording,
+      })
+      console.error('Error generating transcription:', error.value, err)
     }
   }
 

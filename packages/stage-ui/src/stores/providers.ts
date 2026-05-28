@@ -69,6 +69,16 @@ const ALIYUN_NLS_REGIONS = [
 ] as const
 
 type AliyunNlsRegion = typeof ALIYUN_NLS_REGIONS[number]
+const WHISPERCPP_LOCAL_BASE_URL = 'http://127.0.0.1:8765/v1/'
+
+function resolveWhisperCppHealthUrl(baseUrl: unknown): string {
+  const value = typeof baseUrl === 'string' && baseUrl.trim()
+    ? baseUrl.trim()
+    : WHISPERCPP_LOCAL_BASE_URL
+  const normalized = value.replace(/\/+$/, '')
+  const root = normalized.endsWith('/v1') ? normalized.slice(0, -3) : normalized
+  return `${root}/healthz`
+}
 
 export interface ProviderMetadata {
   id: string
@@ -335,23 +345,55 @@ export const useProvidersStore = defineStore('providers', () => {
       category: 'transcription',
       tasks: ['speech-to-text', 'automatic-speech-recognition', 'asr', 'stt'],
       isAvailableBy: isStageTamagotchi,
-      creator: createOpenAI,
+      defaultBaseUrl: WHISPERCPP_LOCAL_BASE_URL,
+      creator: (apiKey, baseURL) => createOpenAI(apiKey || 'local', baseURL || WHISPERCPP_LOCAL_BASE_URL),
       validation: [],
+      capabilities: {
+        listModels: async () => [
+          {
+            id: 'whispercpp-local',
+            name: 'WhisperCPP Local',
+            provider: 'app-local-audio-transcription',
+            description: 'Local Whisper.cpp gateway on this Mac',
+            contextLength: 0,
+            deprecated: false,
+          },
+        ],
+      },
       validators: {
         chatPingCheckAvailable: false,
-        validateProviderConfig: (config) => {
-          if (!config.baseUrl) {
+        validateProviderConfig: async (config) => {
+          try {
+            const response = await fetch(resolveWhisperCppHealthUrl(config.baseUrl))
+            if (!response.ok) {
+              return {
+                errors: [new Error(`Local WhisperCPP gateway returned HTTP ${response.status}`)],
+                reason: `Local WhisperCPP gateway returned HTTP ${response.status}.`,
+                valid: false,
+              }
+            }
+
+            const body = await response.json().catch(() => undefined) as { configured?: boolean } | undefined
+            if (body?.configured === false) {
+              return {
+                errors: [new Error('Local WhisperCPP gateway is not configured.')],
+                reason: 'Local WhisperCPP gateway is not configured.',
+                valid: false,
+              }
+            }
+
             return {
-              errors: [new Error('Base URL is required.')],
-              reason: 'Base URL is required. This is likely a bug, report to developers on https://github.com/moeru-ai/airi/issues.',
-              valid: false,
+              errors: [],
+              reason: '',
+              valid: true,
             }
           }
-
-          return {
-            errors: [],
-            reason: '',
-            valid: true,
+          catch (err) {
+            return {
+              errors: [new Error(`Local WhisperCPP gateway is not reachable: ${(err as Error).message}`)],
+              reason: `Local WhisperCPP gateway is not reachable: ${(err as Error).message}`,
+              valid: false,
+            }
           }
         },
       },

@@ -268,6 +268,7 @@ const TOOLS_RELATED_ERROR_PATTERNS: RegExp[] = [
   /no endpoints found that support tool use/i, // OpenRouter
   /invalid schema for function/i, // OpenAI-compatible
   /invalid.?function.?parameters/i, // OpenAI-compatible
+  /GenerateContentRequest\.tools[\s\S]*function_declarations[\s\S]*(?:property is not defined|INVALID_ARGUMENT)/i, // Google Generative AI via OpenRouter
   /functions are not supported/i, // Azure AI Foundry
   /unrecognized request argument.+tools/i, // Azure AI Foundry
   /tool use with function calling is unsupported/i, // Google Generative AI
