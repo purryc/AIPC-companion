@@ -11,6 +11,9 @@ AIRI's current voice path is assembled from separate STT, chat, vision, and TTS 
 - Add deterministic demo routing for sketch-to-prototype and screen-to-email intents.
 - Add a prototype preview widget that renders generated single-page HTML in a sandboxed iframe.
 - Add a macOS paste helper that writes generated email drafts into the currently focused input without sending.
+- Add an RPG-style companion dialogue bubble below AIRI so realtime voice replies are visible in-place on the desktop overlay.
+- Add `gog` backed Google Workspace actions for explicit Gmail draft creation and Google Calendar create, update, and delete commands.
+- Add short Qwen voice confirmations after successful native actions without duplicating assistant text in the bubble.
 - Keep classic Chat/STT/TTS/Vision providers available as fallback.
 
 ## Capabilities
@@ -18,7 +21,7 @@ AIRI's current voice path is assembled from separate STT, chat, vision, and TTS 
 ### New Capabilities
 
 - `qwen-omni-realtime-conversation`: Realtime DashScope Qwen Omni conversation mode for desktop voice chat.
-- `qwen-omni-desktop-demos`: Screen-aware sketch-to-prototype and email-draft demos powered by Qwen Omni.
+- `qwen-omni-desktop-demos`: Screen-aware sketch-to-prototype, email-draft, Gmail draft, and Calendar command demos powered by Qwen Omni.
 
 ### Modified Capabilities
 
@@ -29,3 +32,4 @@ AIRI's current voice path is assembled from separate STT, chat, vision, and TTS 
 - Affects `apps/stage-tamagotchi`, `packages/stage-ui`, `packages/stage-pages`, shared Eventa contracts, widgets, and package dependencies.
 - Adds `ws` as a desktop app dependency because DashScope Realtime requires an Authorization header that renderer WebSocket cannot set.
 - Adds macOS-only paste behavior behind explicit user intent; no email is sent automatically.
+- Adds `gog` CLI dependency for Gmail and Calendar native actions; destructive Calendar deletes are only attempted after a single target event is identified.

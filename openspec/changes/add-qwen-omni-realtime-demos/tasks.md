@@ -27,12 +27,29 @@
 - [x] 4.5 Add macOS paste helper for focused text fields.
 - [x] 4.6 Add demo workflow tests.
 
-## 5. Verification
+## 5. Google Workspace Actions
 
-- [x] 5.1 Run targeted Vitest suites.
-- [ ] 5.2 Run desktop typecheck and build.
+- [x] 5.1 Add `gog` backed Gmail draft creation that never sends mail.
+- [x] 5.2 Add `gog` backed Google Calendar event creation with `send-updates none`.
+- [x] 5.3 Add Calendar event update support for title, time, location, description, attendees, and Meet fields.
+- [x] 5.4 Add Calendar event delete support with single-target matching and `send-updates none`.
+- [x] 5.5 Add short voice confirmations after successful Gmail and Calendar actions.
+- [x] 5.6 Add command suppression so Qwen realtime does not verbally promise native actions without execution.
+
+## 6. Desktop Companion Bubble
+
+- [x] 6.1 Add an RPG-style desktop dialogue bubble below AIRI.
+- [x] 6.2 Stream assistant text into one visible bubble instead of scattered chat-only output.
+- [x] 6.3 De-duplicate final transcript/text events so assistant text does not appear twice.
+
+## 7. Verification
+
+- [x] 7.1 Run targeted Vitest suites.
+- [ ] 7.2 Run desktop typecheck and build.
   - Typecheck passed for `stage-shared`, `stage-ui`, `stage-pages`, and `stage-tamagotchi`.
   - `pnpm -F @proj-airi/stage-tamagotchi build` is blocked during renderer UnoCSS generation by the existing scrollbar utility CSS error: `CssSyntaxError: [postcss] ... __uno.css: Missed semicolon`.
-- [x] 5.3 Run repository lint or document remaining lint blockers.
+- [x] 7.3 Run repository lint or document remaining lint blockers.
   - Changed Qwen files pass targeted ESLint.
   - Full `pnpm lint` reports existing repo-wide lint errors outside this change, including duplicate declarations in `services/computer-use-mcp`, markdown parse errors in `apps/server/docs`, and global `Buffer`/`process` lint failures.
+- [x] 7.4 Smoke-check `gog` Calendar update/delete syntax with dry runs.
+- [x] 7.5 Restart the desktop app and confirm Qwen Realtime reconnects.

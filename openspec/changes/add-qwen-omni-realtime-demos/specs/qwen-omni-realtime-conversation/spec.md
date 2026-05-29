@@ -22,6 +22,25 @@ The system SHALL provide a `qwen-omni` conversation mode that uses Qwen3.5-Omni 
 - **WHEN** Qwen emits speech-started while assistant audio is playing
 - **THEN** the system cancels current playback and prepares for the new user turn
 
+#### Scenario: Native command interrupts realtime response
+- **WHEN** an input transcript matches a supported native action command
+- **THEN** the system cancels the normal realtime response and runs the deterministic command workflow instead
+
+#### Scenario: Duplicate text deltas are received
+- **WHEN** Qwen emits incremental assistant text and later emits the final transcript for the same response
+- **THEN** the system SHALL avoid appending duplicate assistant text to the active stream
+
+### Requirement: Desktop companion dialogue bubble
+The system SHALL show AIRI's current assistant reply in one RPG-style dialogue bubble on the desktop overlay.
+
+#### Scenario: Assistant reply streams
+- **WHEN** Qwen realtime text deltas arrive while AIRI is visible on the desktop overlay
+- **THEN** the system updates one dialogue bubble near AIRI instead of creating multiple separate desktop text fragments
+
+#### Scenario: Native action confirmation speaks
+- **WHEN** a supported Gmail or Calendar native action succeeds
+- **THEN** AIRI speaks a short fixed confirmation and suppresses duplicate text output for that confirmation turn
+
 ### Requirement: Classic provider fallback
 The system SHALL keep existing Chat, Hearing, Speech, and Vision providers available and unchanged when conversation mode is `classic`.
 
