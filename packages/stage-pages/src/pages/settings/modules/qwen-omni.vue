@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import type { QwenOmniConversationMode, QwenOmniRegion } from '@proj-airi/stage-shared'
+import type { QwenOmniConversationMode, QwenOmniRegion, QwenOmniVoiceRuntimeSnapshot } from '@proj-airi/stage-shared'
 
 import { useQwenOmniStore } from '@proj-airi/stage-ui/stores/modules/qwen-omni'
 import { FieldInput, FieldRange, FieldSelect } from '@proj-airi/ui'
+import { useBroadcastChannel } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
+import { computed } from 'vue'
 
 const qwenOmniStore = useQwenOmniStore()
 const {
@@ -18,6 +20,7 @@ const {
   vadThreshold,
   voice,
 } = storeToRefs(qwenOmniStore)
+const { data: runtimeSnapshot } = useBroadcastChannel<QwenOmniVoiceRuntimeSnapshot, QwenOmniVoiceRuntimeSnapshot>({ name: 'airi-qwen-omni-runtime' })
 
 const modeOptions: Array<{ label: string, value: QwenOmniConversationMode, description: string }> = [
   {
@@ -78,6 +81,20 @@ function formatThreshold(value: number) {
 function formatMs(value: number) {
   return `${Math.round(value)} ms`
 }
+
+const runtimeStatusItems = computed(() => {
+  const snapshot = runtimeSnapshot.value
+  if (!snapshot)
+    return []
+
+  return [
+    ['State', snapshot.state],
+    ['Mic', snapshot.hasStream ? 'stream ready' : 'waiting'],
+    ['Realtime', snapshot.sessionActive ? 'connected' : 'closed'],
+    ['Input', snapshot.inputAttached ? `attached #${snapshot.streamRevision}` : 'detached'],
+    ['Audio', `${snapshot.audioChunksSent ?? 0} in / ${snapshot.audioChunksPlayed ?? 0} out`],
+  ]
+})
 </script>
 
 <template>
@@ -111,6 +128,50 @@ function formatMs(value: number) {
         description="Match the DashScope region where your API key is enabled."
         :options="regionOptions"
       />
+    </section>
+
+    <section class="flex flex-col gap-4 rounded-xl bg-white/70 p-5 shadow-sm dark:bg-neutral-950/70">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h3 class="m-0 text-base text-neutral-900 font-semibold dark:text-neutral-100">
+            Voice runtime
+          </h3>
+          <p class="m-0 mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+            Live status from the desktop Qwen Omni voice bridge.
+          </p>
+        </div>
+        <span
+          class="rounded-full px-3 py-1 text-xs font-medium"
+          :class="runtimeSnapshot?.state === 'error'
+            ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-200'
+            : 'bg-cyan-100 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-200'"
+        >
+          {{ runtimeSnapshot?.state ?? 'not started' }}
+        </span>
+      </div>
+      <div
+        v-if="runtimeStatusItems.length"
+        class="grid grid-cols-2 gap-3 text-sm"
+      >
+        <div
+          v-for="[label, value] in runtimeStatusItems"
+          :key="label"
+          class="rounded-lg bg-neutral-50 px-3 py-2 dark:bg-neutral-900"
+        >
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            {{ label }}
+          </div>
+          <div class="mt-1 break-all text-neutral-900 font-medium dark:text-neutral-100">
+            {{ value }}
+          </div>
+        </div>
+      </div>
+      <div
+        v-if="runtimeSnapshot?.lastError"
+        class="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-200"
+      >
+        {{ runtimeSnapshot.lastError }}
+      </div>
     </section>
 
     <section class="flex flex-col gap-5 rounded-xl bg-white/70 p-5 shadow-sm dark:bg-neutral-950/70">

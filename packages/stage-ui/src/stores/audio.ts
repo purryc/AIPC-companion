@@ -77,6 +77,7 @@ export const useSpeakingStore = defineStore('character-speaking', () => {
   const nowSpeakingAvatarBorderOpacityMin = 30
   const nowSpeakingAvatarBorderOpacityMax = 100
   const mouthOpenSize = ref(0)
+  const mouthForm = ref(0)
   const nowSpeaking = ref(false)
 
   const nowSpeakingAvatarBorderOpacity = computed<number>(() => {
@@ -89,6 +90,7 @@ export const useSpeakingStore = defineStore('character-speaking', () => {
 
   return {
     mouthOpenSize,
+    mouthForm,
     nowSpeaking,
     nowSpeakingAvatarBorderOpacity,
   }

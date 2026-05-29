@@ -92,6 +92,12 @@ const menu = computed(() => [
     to: '/devtools/vision',
   },
   {
+    title: 'Desktop Context',
+    description: 'Inspect screen, clipboard, selection, active window, and mouse context',
+    icon: 'i-solar:radar-2-bold-duotone',
+    to: '/devtools/desktop-context',
+  },
+  {
     title: 'Global Shortcut',
     description: 'Register/unregister global shortcuts and watch trigger events fire',
     icon: 'i-solar:keyboard-bold-duotone',

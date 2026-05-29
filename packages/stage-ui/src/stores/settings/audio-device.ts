@@ -1,6 +1,6 @@
 import { useLocalStorageManualReset } from '@proj-airi/stage-shared/composables'
 import { defineStore } from 'pinia'
-import { watch } from 'vue'
+import { nextTick, watch } from 'vue'
 
 import { useAudioDevice } from '../../composables/audio'
 
@@ -16,9 +16,37 @@ export const useSettingsAudioDevice = defineStore('settings-audio-devices', () =
     selectedAudioInputNonPersist.value = newValue
   })
 
+  function resolveDefaultAudioInput() {
+    return audioInputs.value.find(input => input.deviceId === 'default')?.deviceId || audioInputs.value[0]?.deviceId || ''
+  }
+
+  function hasPersistedAudioInput() {
+    return Boolean(
+      selectedAudioInputPersist.value
+      && audioInputs.value.some(device => device.deviceId === selectedAudioInputPersist.value),
+    )
+  }
+
+  async function startEnabledInputStream() {
+    if (!audioInputEnabled.value)
+      return
+
+    await askPermission()
+
+    if (!hasPersistedAudioInput()) {
+      selectedAudioInputPersist.value = resolveDefaultAudioInput()
+    }
+
+    await nextTick()
+    await startStream()
+  }
+
   watch(audioInputEnabled, (val) => {
     if (val) {
-      startStream()
+      void startEnabledInputStream().catch((error) => {
+        console.error('Failed to start microphone stream:', error)
+        audioInputEnabled.value = false
+      })
     }
     else {
       stopStream()
@@ -38,13 +66,10 @@ export const useSettingsAudioDevice = defineStore('settings-audio-devices', () =
   }
   catch (e) { console.info(`Unable to track microphone permission: ${e}`) }
   void microphonePermissionStatus // suppress unused variable lint
-  function initialize() {
-    const hasSelectedInput = selectedAudioInputPersist.value
-      && audioInputs.value.some(device => device.deviceId === selectedAudioInputPersist.value)
+  async function initialize() {
+    if (audioInputEnabled.value)
+      await startEnabledInputStream()
 
-    if (audioInputEnabled.value && hasSelectedInput) {
-      startStream()
-    }
     if (selectedAudioInputNonPersist.value && !audioInputEnabled.value) {
       selectedAudioInputPersist.value = selectedAudioInputNonPersist.value
     }

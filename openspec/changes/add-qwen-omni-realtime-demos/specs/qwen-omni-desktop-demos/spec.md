@@ -1,5 +1,36 @@
 ## ADDED Requirements
 
+### Requirement: Stable Qwen Omni voice runtime
+The system SHALL run desktop Qwen Omni voice through one renderer runtime that owns realtime session state, microphone PCM input attachment, audio playback, transcript handling, and native command suppression.
+
+#### Scenario: Voice startup is idempotent
+- **WHEN** the mic toggle, Qwen Omni mode, or stream object changes repeatedly
+- **THEN** the system reconciles the desired state and MUST NOT open duplicate realtime sessions or attach duplicate microphone worklets
+
+#### Scenario: Stream replacement keeps realtime session stable
+- **WHEN** the microphone stream changes while Qwen Omni mode remains enabled
+- **THEN** the system reattaches PCM input to the new stream without closing an otherwise healthy realtime session
+
+#### Scenario: Disabled mode closes realtime resources
+- **WHEN** the mic is disabled, Qwen Omni mode is turned off, or the stage unmounts
+- **THEN** the system closes realtime resources, detaches microphone input, clears pending output audio, and returns the voice runtime to idle
+
+#### Scenario: Transcript delta previews do not execute commands
+- **WHEN** Qwen emits partial input transcript deltas that match Calendar, Gmail, email, or prototype command phrases
+- **THEN** the system may show caption preview but MUST NOT execute native side effects until a final transcript arrives
+
+#### Scenario: Final transcript executes once
+- **WHEN** a final transcript contains a deterministic native command
+- **THEN** the system executes that command at most once for the turn and suppresses duplicate realtime assistant text while preserving a short voice confirmation
+
+#### Scenario: Runtime diagnostics are visible
+- **WHEN** the user opens Qwen Omni settings
+- **THEN** the system shows the current voice runtime state, mic stream status, realtime status, input attachment status, audio chunk counts, and latest error when available
+
+#### Scenario: Runtime cache cleanup preserves settings
+- **WHEN** the user runs the runtime cache cleanup
+- **THEN** the system deletes disposable Electron/Vite cache directories but MUST preserve Local Storage, IndexedDB, API keys, OAuth state, and user settings
+
 ### Requirement: Sketch-to-prototype preview
 The system SHALL generate a prototype from a captured screen or window image and render it in an AIRI overlay widget.
 
@@ -25,6 +56,25 @@ The system SHALL draft an email reply from the current screen context and write 
 #### Scenario: Paste fails
 - **WHEN** macOS paste automation fails
 - **THEN** the system keeps the generated draft in the clipboard and reports the failure to the user
+
+### Requirement: Desktop context inspection
+The system SHALL expose a desktop context inspector so the user can verify what AIRI can read before Qwen Omni uses that context.
+
+#### Scenario: Context snapshot captured
+- **WHEN** the user refreshes Desktop Context from devtools
+- **THEN** the system returns a one-shot snapshot containing enabled sources among active app/window, clipboard text, selected text, mouse position, screen capture permissions, and macOS Accessibility permission state
+
+#### Scenario: Screen frame captured
+- **WHEN** the user enables screen frame capture and selects a screen or window source
+- **THEN** the inspector captures one JPEG frame and displays source metadata without starting a persistent model upload
+
+#### Scenario: Selected text fallback is explicit
+- **WHEN** Accessibility selected text is empty and the user enables Cmd+C fallback
+- **THEN** the system may send Cmd+C, restore plain-text clipboard content, and mark the result with a warning
+
+#### Scenario: Qwen-ready payload preview
+- **WHEN** a desktop context snapshot exists
+- **THEN** the inspector shows a structured payload preview containing text context, pointer context, active window context, screen frame metadata, and warnings
 
 ### Requirement: Gmail draft creation
 The system SHALL create Gmail drafts through the local authenticated `gog` CLI only after the user explicitly asks AIRI to write or create an email draft.

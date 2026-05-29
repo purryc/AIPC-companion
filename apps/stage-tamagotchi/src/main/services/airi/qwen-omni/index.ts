@@ -539,6 +539,9 @@ function sendRealtimeText(text: string) {
   })
   sendRealtimeJson({
     type: 'response.create',
+    response: {
+      modalities: ['text', 'audio'],
+    },
   })
 }
 

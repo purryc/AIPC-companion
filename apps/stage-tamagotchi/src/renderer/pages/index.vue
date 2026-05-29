@@ -34,7 +34,7 @@ import { useOnboardingStore } from '@proj-airi/stage-ui/stores/onboarding'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
 import { refDebounced, useBroadcastChannel } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 
 import ControlsIsland from '../components/stage-islands/controls-island/index.vue'
 import ResourceStatusIsland from '../components/stage-islands/resource-status-island/index.vue'
@@ -241,7 +241,7 @@ watch(modelSettingsRuntimeChannelEvent, (event) => {
 
 const settingsAudioDeviceStore = useSettingsAudioDevice()
 const { stream, enabled } = storeToRefs(settingsAudioDeviceStore)
-const { askPermission } = settingsAudioDeviceStore
+const { askPermission, startStream } = settingsAudioDeviceStore
 const { startRecord, stopRecord, onStopRecord } = useAudioRecorder(stream)
 const hearingPipeline = useHearingSpeechInputPipeline()
 const { transcribeForRecording, transcribeForMediaStream, stopStreamingTranscription } = hearingPipeline
@@ -257,6 +257,7 @@ const { sending: chatSending } = storeToRefs(chatOrchestratorStore)
 const { qwenOmniModeEnabled } = storeToRefs(qwenOmniConfigStore)
 const qwenOmniRuntimeStore = useTamagotchiQwenOmniStore()
 const shouldUseStreamInput = computed(() => !qwenOmniModeEnabled.value && supportsStreamInput.value && !!stream.value)
+const qwenStreamRevision = ref(0)
 
 const qwenScreenVideoRef = ref<HTMLVideoElement>()
 const qwenScreenCapture = useVisionScreenCapture({ types: ['screen', 'window'] })
@@ -450,6 +451,34 @@ async function handleSpeechEnd() {
   stopRecord()
 }
 
+async function ensureMicrophoneStream() {
+  if (stream.value)
+    return stream.value
+
+  await askPermission()
+  await startStream()
+  await nextTick()
+
+  if (stream.value)
+    return stream.value
+
+  await new Promise(resolve => setTimeout(resolve, 50))
+  return stream.value
+}
+
+async function reconcileQwenOmniVoiceFromStage() {
+  const currentStream = enabled.value && qwenOmniModeEnabled.value
+    ? await ensureMicrophoneStream()
+    : undefined
+
+  await qwenOmniRuntimeStore.reconcileQwenOmniVoice({
+    enabled: enabled.value,
+    qwenModeEnabled: qwenOmniModeEnabled.value,
+    stream: currentStream,
+    streamRevision: qwenStreamRevision.value,
+  })
+}
+
 async function startAudioInteraction() {
   if (audioInteractionStarting.value)
     return
@@ -468,13 +497,8 @@ async function startAudioInteraction() {
     console.info('[Main Page] Starting audio interaction...')
 
     if (qwenOmniModeEnabled.value) {
-      if (!stream.value) {
-        console.warn('[Main Page] Qwen Omni mode is enabled, but no microphone stream is available yet')
-        return
-      }
-
-      await qwenOmniRuntimeStore.startQwenOmniConversation(stream.value)
-      console.info('[Main Page] Qwen Omni realtime conversation started')
+      await reconcileQwenOmniVoiceFromStage()
+      console.info('[Main Page] Qwen Omni realtime conversation reconciled')
       return
     }
 
@@ -556,7 +580,12 @@ function stopAudioInteraction() {
     stopOnStopRecord?.()
     stopOnStopRecord = undefined
     audioInteractionStarting.value = false
-    void qwenOmniRuntimeStore.stopQwenOmniConversation()
+    void qwenOmniRuntimeStore.reconcileQwenOmniVoice({
+      enabled: false,
+      qwenModeEnabled: false,
+      stream: undefined,
+      streamRevision: qwenStreamRevision.value,
+    })
     void stopStreamingTranscription(true)
     disposeVAD()
   })
@@ -575,7 +604,7 @@ watch(enabled, async (val) => {
 
 watch(qwenOmniModeEnabled, async () => {
   stopAudioInteraction()
-  if (enabled.value && stream.value)
+  if (enabled.value)
     await startAudioInteraction()
 })
 
@@ -597,6 +626,7 @@ onUnmounted(() => {
 })
 
 watch(stream, async (currentStream) => {
+  qwenStreamRevision.value += 1
   if (!enabled.value || !currentStream || audioInteractionStarting.value)
     return
 
@@ -605,8 +635,15 @@ watch(stream, async (currentStream) => {
   // but any existing transcription transport is still bound to the old one. Always allow the page to
   // re-run `startAudioInteraction()` for a newly available stream unless startup is already underway.
   console.info('[Main Page] Stream became available, ensuring audio interaction is started')
-  if (qwenOmniModeEnabled.value)
-    await qwenOmniRuntimeStore.stopQwenOmniConversation()
+  if (qwenOmniModeEnabled.value) {
+    await qwenOmniRuntimeStore.reconcileQwenOmniVoice({
+      enabled: enabled.value,
+      qwenModeEnabled: qwenOmniModeEnabled.value,
+      stream: currentStream,
+      streamRevision: qwenStreamRevision.value,
+    })
+    return
+  }
 
   await startAudioInteraction()
 })

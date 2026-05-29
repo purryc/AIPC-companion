@@ -4,6 +4,73 @@ export type QwenOmniConversationMode = 'classic' | 'qwen-omni'
 
 export type QwenOmniCommandKind = 'chat' | 'prototype' | 'email' | 'gmail-draft' | 'calendar-event' | 'calendar-update' | 'calendar-delete'
 
+export type QwenOmniTurnId = string
+
+export type QwenOmniVoiceState = 'idle' | 'acquiring-mic' | 'connecting' | 'streaming' | 'responding' | 'command-running' | 'closing' | 'error'
+
+export type QwenOmniVoiceReconcileAction = 'wait-for-mic' | 'connect-realtime' | 'attach-input' | 'close-realtime' | 'report-missing-config'
+
+/**
+ * Serializable snapshot of the renderer-side Qwen Omni voice runtime.
+ *
+ * Use when:
+ * - UI diagnostics need to show where the realtime voice path is blocked
+ * - Reconcile logic needs a stable state summary without holding browser objects
+ *
+ * Expect:
+ * - No secrets or MediaStream objects are included
+ */
+export interface QwenOmniVoiceRuntimeSnapshot {
+  state: QwenOmniVoiceState
+  enabled: boolean
+  qwenModeEnabled: boolean
+  configured: boolean
+  hasStream: boolean
+  streamRevision: number
+  sessionActive: boolean
+  inputAttached: boolean
+  activeTurnId?: QwenOmniTurnId
+  lastError?: string
+  lastEventAt?: number
+  audioChunksSent?: number
+  audioChunksPlayed?: number
+}
+
+/**
+ * Desired voice inputs from the stage page into the Qwen Omni runtime.
+ *
+ * Use when:
+ * - The page reconciles mic enabled state, conversation mode, and current stream
+ *
+ * Expect:
+ * - The caller owns microphone permission and MediaStream creation
+ */
+export interface QwenOmniVoiceReconcileInput {
+  enabled: boolean
+  qwenModeEnabled: boolean
+  configured: boolean
+  hasStream: boolean
+  streamRevision: number
+}
+
+export interface QwenOmniVoiceReconcileDecision {
+  state: QwenOmniVoiceState
+  actions: QwenOmniVoiceReconcileAction[]
+}
+
+export interface QwenOmniFinalTranscriptCommandInput {
+  final: boolean
+  text: string
+  command: QwenOmniCommandKind
+  turnId?: QwenOmniTurnId
+  previousTurnId?: QwenOmniTurnId
+  previousText?: string
+  previousCommand?: QwenOmniCommandKind
+  previousExecutedAt?: number
+  now?: number
+  duplicateWindowMs?: number
+}
+
 export interface QwenOmniConfig {
   apiKey: string
   region: QwenOmniRegion
@@ -45,8 +112,8 @@ export type QwenOmniRealtimeEvent
     | { type: 'response-done' }
     | { type: 'speech-started' }
     | { type: 'speech-stopped' }
-    | { type: 'input-transcript-delta', text: string, stash: string }
-    | { type: 'input-transcript', text: string }
+    | { type: 'input-transcript-delta', text: string, stash: string, turnId?: QwenOmniTurnId }
+    | { type: 'input-transcript', text: string, turnId?: QwenOmniTurnId }
     | { type: 'text-delta', text: string }
     | { type: 'audio-delta', pcm16: Uint8Array, sampleRate: 24000 }
     | { type: 'error', message: string, fatal?: boolean }
@@ -369,6 +436,83 @@ export function resolveQwenOmniEndpoints(region: QwenOmniRegion): QwenOmniEndpoi
   return QWEN_OMNI_ENDPOINTS[region]
 }
 
+function normalizedTranscriptKey(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[。！？!?.,，；;：:\s]+/g, ' ')
+    .trim()
+}
+
+/**
+ * Decides the next Qwen Omni voice lifecycle action without touching browser state.
+ *
+ * Use when:
+ * - Renderer code needs idempotent start/stop behavior across watcher churn
+ * - Tests need to lock the no-duplicate-start contract
+ *
+ * Expect:
+ * - The caller performs returned side effects in order and ignores stale async runs
+ */
+export function resolveQwenOmniVoiceReconcile(
+  snapshot: QwenOmniVoiceRuntimeSnapshot,
+  input: QwenOmniVoiceReconcileInput,
+): QwenOmniVoiceReconcileDecision {
+  const shouldBeClosed = !input.enabled || !input.qwenModeEnabled
+  if (shouldBeClosed) {
+    return snapshot.sessionActive || snapshot.inputAttached || snapshot.state !== 'idle'
+      ? { state: 'closing', actions: ['close-realtime'] }
+      : { state: 'idle', actions: [] }
+  }
+
+  if (!input.configured)
+    return { state: 'error', actions: ['report-missing-config'] }
+
+  if (!input.hasStream)
+    return { state: 'acquiring-mic', actions: ['wait-for-mic'] }
+
+  if (!snapshot.sessionActive)
+    return { state: 'connecting', actions: ['connect-realtime', 'attach-input'] }
+
+  if (!snapshot.inputAttached || snapshot.streamRevision !== input.streamRevision)
+    return { state: 'streaming', actions: ['attach-input'] }
+
+  if (snapshot.state === 'responding' || snapshot.state === 'command-running')
+    return { state: snapshot.state, actions: [] }
+
+  return { state: 'streaming', actions: [] }
+}
+
+/**
+ * Guards side-effect demo commands so only stable final transcripts execute them.
+ *
+ * Use when:
+ * - Realtime transcript deltas and final transcript events may contain the same command text
+ * - Calendar, Gmail, or screen workflows must not run twice for one spoken turn
+ *
+ * Expect:
+ * - Normal chat always returns false because Qwen realtime already owns the response
+ */
+export function shouldRunQwenOmniCommandForFinalTranscript(input: QwenOmniFinalTranscriptCommandInput): boolean {
+  const key = normalizedTranscriptKey(input.text)
+  if (!input.final || !key || input.command === 'chat')
+    return false
+
+  if (input.turnId && input.previousTurnId && input.turnId === input.previousTurnId)
+    return false
+
+  const previousKey = normalizedTranscriptKey(input.previousText ?? '')
+  if (!previousKey)
+    return true
+
+  const now = input.now ?? Date.now()
+  const previousExecutedAt = input.previousExecutedAt ?? 0
+  const duplicateWindowMs = input.duplicateWindowMs ?? 5000
+  const sameCommand = input.previousCommand === input.command
+  const overlappingText = key === previousKey || key.includes(previousKey) || previousKey.includes(key)
+
+  return !sameCommand || !overlappingText || now - previousExecutedAt >= duplicateWindowMs
+}
+
 export function normalizeQwenOmniConfig(config: Partial<QwenOmniConfig>): QwenOmniConfig {
   const realtimeModel = config.realtimeModel?.trim()
   const voice = config.voice?.trim()
@@ -486,9 +630,14 @@ export function parseQwenOmniRealtimeProviderEvent(record: Record<string, unknow
         type: 'input-transcript-delta',
         text: rawStringField(record, 'text') ?? '',
         stash: rawStringField(record, 'stash') ?? '',
+        turnId: rawStringField(record, 'item_id') ?? rawStringField(record, 'itemId'),
       }
     case 'conversation.item.input_audio_transcription.completed':
-      return { type: 'input-transcript', text: rawStringField(record, 'transcript') ?? '' }
+      return {
+        type: 'input-transcript',
+        text: rawStringField(record, 'transcript') ?? '',
+        turnId: rawStringField(record, 'item_id') ?? rawStringField(record, 'itemId'),
+      }
     case 'response.text.delta':
     case 'response.audio_transcript.delta':
       return { type: 'text-delta', text: rawStringField(record, 'delta') ?? '' }

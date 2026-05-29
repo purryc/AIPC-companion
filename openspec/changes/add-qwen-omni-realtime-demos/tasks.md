@@ -42,14 +42,31 @@
 - [x] 6.2 Stream assistant text into one visible bubble instead of scattered chat-only output.
 - [x] 6.3 De-duplicate final transcript/text events so assistant text does not appear twice.
 
-## 7. Verification
+## 7. Desktop Context Layer
 
-- [x] 7.1 Run targeted Vitest suites.
-- [ ] 7.2 Run desktop typecheck and build.
+- [x] 7.1 Add a desktop context Eventa snapshot contract for active window, clipboard, selected text, mouse, and permissions.
+- [x] 7.2 Add macOS read paths for clipboard, Accessibility selected text, active app/window, and cursor display matching.
+- [x] 7.3 Add an explicit Cmd+C selected-text fallback guarded behind a user-controlled devtools toggle.
+- [x] 7.4 Add a Desktop Context devtools inspector for screen frame, clipboard, selected text, active window, mouse, and Qwen-ready payload preview.
+- [x] 7.5 Add unit coverage for context snapshot wiring, active-window parsing, and display matching.
+
+## 8. Verification
+
+- [x] 8.1 Run targeted Vitest suites.
+- [ ] 8.2 Run desktop typecheck and build.
   - Typecheck passed for `stage-shared`, `stage-ui`, `stage-pages`, and `stage-tamagotchi`.
   - `pnpm -F @proj-airi/stage-tamagotchi build` is blocked during renderer UnoCSS generation by the existing scrollbar utility CSS error: `CssSyntaxError: [postcss] ... __uno.css: Missed semicolon`.
-- [x] 7.3 Run repository lint or document remaining lint blockers.
+- [x] 8.3 Run repository lint or document remaining lint blockers.
   - Changed Qwen files pass targeted ESLint.
   - Full `pnpm lint` reports existing repo-wide lint errors outside this change, including duplicate declarations in `services/computer-use-mcp`, markdown parse errors in `apps/server/docs`, and global `Buffer`/`process` lint failures.
-- [x] 7.4 Smoke-check `gog` Calendar update/delete syntax with dry runs.
-- [x] 7.5 Restart the desktop app and confirm Qwen Realtime reconnects.
+- [x] 8.4 Smoke-check `gog` Calendar update/delete syntax with dry runs.
+- [x] 8.5 Restart the desktop app and confirm Qwen Realtime reconnects.
+
+## 9. Voice Runtime Stabilization
+
+- [x] 9.1 Add shared Qwen voice runtime state, snapshot, reconcile, and final-transcript command guard types.
+- [x] 9.2 Refactor desktop Qwen voice startup into `reconcileQwenOmniVoice` / `resetQwenOmniVoice` with generation guards.
+- [x] 9.3 Stop running Calendar/Gmail/Prototype side effects from transcript deltas; run them only from final unique transcripts.
+- [x] 9.4 Add Qwen voice runtime diagnostics and broadcast them to the Qwen Omni settings page.
+- [x] 9.5 Add safe Electron runtime cache cleanup helpers and a macOS permissioned dev launch script.
+- [x] 9.6 Add unit coverage for reconcile actions, final transcript command gating, and cache cleanup target preservation.

@@ -84,7 +84,7 @@ const {
   spineMaxFps,
   spineRenderScale,
 } = storeToRefs(settingsStore)
-const { mouthOpenSize, nowSpeaking } = storeToRefs(useSpeakingStore())
+const { mouthForm, mouthOpenSize, nowSpeaking } = storeToRefs(useSpeakingStore())
 const { audioContext } = useAudioContext()
 const currentAudioSource = ref<AudioBufferSourceNode>()
 
@@ -456,6 +456,7 @@ speechPipeline.on('onTurnCancel', ({ turnId }) => {
 playbackManager.onEnd(() => {
   nowSpeaking.value = false
   mouthOpenSize.value = 0
+  mouthForm.value = 0
 })
 
 playbackManager.onStart(({ item }) => {
@@ -485,9 +486,11 @@ function startLipSyncLoop() {
   const tick = () => {
     if (!nowSpeaking.value || !live2dLipSync.value) {
       mouthOpenSize.value = 0
+      mouthForm.value = 0
     }
     else {
       mouthOpenSize.value = live2dLipSync.value.getMouthOpen()
+      mouthForm.value = live2dLipSync.value.getMouthForm()
     }
     lipSyncLoopId.value = requestAnimationFrame(tick)
   }
@@ -502,6 +505,7 @@ function stopLipSyncLoop() {
   }
 
   mouthOpenSize.value = 0
+  mouthForm.value = 0
 }
 
 function resetLive2dLipSync() {
@@ -882,6 +886,7 @@ defineExpose({
         :model-src="stageModelSelectedUrl"
         :model-id="stageModelSelected"
         :cursor-position="cursorPosition"
+        :mouth-form="mouthForm"
         :mouth-open-size="mouthOpenSize"
         :now-speaking="nowSpeaking"
         :paused="paused"

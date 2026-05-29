@@ -14,6 +14,9 @@ AIRI's current voice path is assembled from separate STT, chat, vision, and TTS 
 - Add an RPG-style companion dialogue bubble below AIRI so realtime voice replies are visible in-place on the desktop overlay.
 - Add `gog` backed Google Workspace actions for explicit Gmail draft creation and Google Calendar create, update, and delete commands.
 - Add short Qwen voice confirmations after successful native actions without duplicating assistant text in the bubble.
+- Refactor Qwen realtime voice into one renderer runtime state machine so mic, socket, transcript, command, and playback lifecycle no longer race across multiple watchers.
+- Add safe Electron runtime cache cleanup that removes stale `Cache`/`Code Cache`/`GPUCache` data while preserving Local Storage, IndexedDB, API keys, and OAuth state.
+- Add live Qwen voice diagnostics in settings for mic, socket, input attachment, audio chunks, state, and last error.
 - Keep classic Chat/STT/TTS/Vision providers available as fallback.
 
 ## Capabilities
@@ -33,3 +36,4 @@ AIRI's current voice path is assembled from separate STT, chat, vision, and TTS 
 - Adds `ws` as a desktop app dependency because DashScope Realtime requires an Authorization header that renderer WebSocket cannot set.
 - Adds macOS-only paste behavior behind explicit user intent; no email is sent automatically.
 - Adds `gog` CLI dependency for Gmail and Calendar native actions; destructive Calendar deletes are only attempted after a single target event is identified.
+- Adds macOS dev scripts for the permission-bound root Electron app so Screen Recording, Accessibility, and Microphone permissions stay attached to one app identity.

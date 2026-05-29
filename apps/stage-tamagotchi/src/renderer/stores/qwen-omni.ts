@@ -1,3 +1,5 @@
+import type { Live2DLipSync } from '@proj-airi/model-driver-lipsync'
+import type { Profile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
 import type {
   QwenOmniCalendarEventContext,
   QwenOmniCalendarEventDeleteResult,
@@ -5,6 +7,10 @@ import type {
   QwenOmniCalendarEventUpdateResult,
   QwenOmniCommandKind,
   QwenOmniRealtimeEvent,
+  QwenOmniTurnId,
+  QwenOmniVoiceReconcileInput,
+  QwenOmniVoiceRuntimeSnapshot,
+  QwenOmniVoiceState,
 } from '@proj-airi/stage-shared'
 import type { ChatHistoryItem } from '@proj-airi/stage-ui/types/chat'
 
@@ -12,7 +18,13 @@ import workletUrl from '@proj-airi/stage-ui/workers/vad/process.worklet?worker&u
 
 import { errorMessageFrom } from '@moeru/std'
 import { useElectronEventaContext, useElectronEventaInvoke } from '@proj-airi/electron-vueuse'
-import { routeQwenOmniCommand } from '@proj-airi/stage-shared'
+import { createLive2DLipSync } from '@proj-airi/model-driver-lipsync'
+import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
+import {
+  resolveQwenOmniVoiceReconcile,
+  routeQwenOmniCommand,
+  shouldRunQwenOmniCommandForFinalTranscript,
+} from '@proj-airi/stage-shared'
 import { useSpeakingStore } from '@proj-airi/stage-ui/stores/audio'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
@@ -20,7 +32,7 @@ import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store
 import { useQwenOmniStore as useQwenOmniConfigStore } from '@proj-airi/stage-ui/stores/modules/qwen-omni'
 import { useBroadcastChannel } from '@vueuse/core'
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
   qwenOmniCreateCalendarEvent,
@@ -39,7 +51,7 @@ import {
   qwenOmniUpdateCalendarEvent,
   widgetsAdd,
 } from '../../shared/eventa'
-import { calculatePcm16Rms, pcm16BytesToFloat32, schedulePcmChunk } from '../libs/qwen-omni/pcm-playback'
+import { calculatePcm16MouthFrames, pcm16BytesToFloat32, schedulePcmChunk } from '../libs/qwen-omni/pcm-playback'
 
 type CaptionChannelEvent
   = | { type: 'caption-speaker', text: string }
@@ -54,6 +66,20 @@ interface QwenAudioInput {
 
 interface QwenOmniDemoHandlers {
   captureScreenFrame?: () => Promise<string | null>
+}
+
+interface ReconcileVoiceInput {
+  enabled: boolean
+  qwenModeEnabled: boolean
+  stream?: MediaStream
+  streamRevision: number
+}
+
+interface VoiceDiagnosticEntry {
+  at: number
+  event: string
+  state: QwenOmniVoiceState
+  details?: Record<string, string | number | boolean | undefined>
 }
 
 function float32ToInt16(buffer: Float32Array) {
@@ -136,28 +162,71 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   const chatOrchestrator = useChatOrchestratorStore()
   const speakingStore = useSpeakingStore()
   const { post: postCaption } = useBroadcastChannel<CaptionChannelEvent, CaptionChannelEvent>({ name: 'airi-caption-overlay' })
+  const { post: postRuntimeSnapshot } = useBroadcastChannel<QwenOmniVoiceRuntimeSnapshot, QwenOmniVoiceRuntimeSnapshot>({ name: 'airi-qwen-omni-runtime' })
 
   const sessionActive = ref(false)
   const connecting = ref(false)
   const processingCommand = ref(false)
   const lastError = ref('')
+  const voiceState = ref<QwenOmniVoiceState>('idle')
+  const diagnostics = ref<VoiceDiagnosticEntry[]>([])
+  const audioChunksSent = ref(0)
+  const audioChunksPlayed = ref(0)
+  const lastEventAt = ref(0)
+  const lastResetReason = ref('')
+  const desiredVoiceInput = ref<QwenOmniVoiceReconcileInput>({
+    enabled: false,
+    qwenModeEnabled: false,
+    configured: qwenConfig.configured,
+    hasStream: false,
+    streamRevision: 0,
+  })
 
   let eventsInitialized = false
   let input: QwenAudioInput | undefined
   let outputAudioContext: AudioContext | undefined
   let queuedUntil = 0
   const activeOutputSources = new Set<AudioBufferSourceNode>()
+  const mouthFrameTimers = new Set<ReturnType<typeof setTimeout>>()
+  let mouthFrameGeneration = 0
+  let outputLipSync: Live2DLipSync | undefined
+  let outputLipSyncPromise: Promise<Live2DLipSync | undefined> | undefined
+  let outputLipSyncLoopId: number | undefined
   let realtimeStartPromise: Promise<void> | undefined
+  let reconcileGeneration = 0
+  let attachedStreamRevision = 0
   let handlers: QwenOmniDemoHandlers = {}
   let commandOverrideActive = false
   let pendingInputTranscript = ''
   let pendingInputTranscriptPreview = ''
-  let pendingCommandTimer: ReturnType<typeof setTimeout> | undefined
-  let lastHandledCommandKey = ''
   let commandOverrideTimer: ReturnType<typeof setTimeout> | undefined
   let voiceConfirmationActive = false
   let voiceConfirmationTimer: ReturnType<typeof setTimeout> | undefined
   let lastCalendarEvent: QwenOmniCalendarEventContext | undefined
+  let lastExecutedCommandKey = ''
+  let lastExecutedCommandKind: QwenOmniCommandKind = 'chat'
+  let lastExecutedCommandAt = 0
+  let lastExecutedCommandTurnId: QwenOmniTurnId | undefined
+  let lastFinalTranscriptTurnId: QwenOmniTurnId | undefined
+  let lastFinalTranscriptText = ''
+  let currentTurnId: QwenOmniTurnId | undefined
+  let turnSequence = 0
+
+  const voiceSnapshot = computed<QwenOmniVoiceRuntimeSnapshot>(() => ({
+    state: voiceState.value,
+    enabled: desiredVoiceInput.value.enabled,
+    qwenModeEnabled: desiredVoiceInput.value.qwenModeEnabled,
+    configured: desiredVoiceInput.value.configured,
+    hasStream: desiredVoiceInput.value.hasStream,
+    streamRevision: attachedStreamRevision,
+    sessionActive: sessionActive.value,
+    inputAttached: Boolean(input),
+    activeTurnId: currentTurnId,
+    lastError: lastError.value || undefined,
+    lastEventAt: lastEventAt.value || undefined,
+    audioChunksSent: audioChunksSent.value,
+    audioChunksPlayed: audioChunksPlayed.value,
+  }))
 
   function appendHistoryMessage(message: ChatHistoryItem) {
     if (!chatSession.activeSessionId)
@@ -179,6 +248,33 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     appendHistoryMessage(errorHistoryMessage(message))
   }
 
+  function logVoice(event: string, details?: VoiceDiagnosticEntry['details']) {
+    const entry = {
+      at: Date.now(),
+      event,
+      state: voiceState.value,
+      details,
+    }
+    diagnostics.value = [entry, ...diagnostics.value].slice(0, 40)
+    console.info('[qwen-omni:voice]', event, {
+      state: entry.state,
+      ...details,
+    })
+  }
+
+  function setVoiceState(state: QwenOmniVoiceState, reason?: string) {
+    if (voiceState.value === state)
+      return
+
+    voiceState.value = state
+    logVoice('state', { next: state, reason })
+  }
+
+  function nextTurnId(): QwenOmniTurnId {
+    turnSequence += 1
+    return `turn_${Date.now()}_${turnSequence}`
+  }
+
   function normalizedCommandKey(text: string) {
     return text.toLowerCase().replace(/\s+/g, ' ').trim()
   }
@@ -197,21 +293,12 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     return command
   }
 
-  function hasHandledCommandText(text: string) {
+  function markCommandExecuted(text: string, command: QwenOmniCommandKind, turnId?: QwenOmniTurnId) {
     const key = normalizedCommandKey(text)
-    return Boolean(
-      key
-      && lastHandledCommandKey
-      && (key === lastHandledCommandKey || key.includes(lastHandledCommandKey) || lastHandledCommandKey.includes(key)),
-    )
-  }
-
-  function clearPendingCommandTimer() {
-    if (!pendingCommandTimer)
-      return
-
-    clearTimeout(pendingCommandTimer)
-    pendingCommandTimer = undefined
+    lastExecutedCommandKey = key
+    lastExecutedCommandKind = command
+    lastExecutedCommandAt = Date.now()
+    lastExecutedCommandTurnId = turnId
   }
 
   function clearVoiceConfirmationSuppression() {
@@ -253,7 +340,6 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   function resetPendingInputTranscript() {
     pendingInputTranscript = ''
     pendingInputTranscriptPreview = ''
-    clearPendingCommandTimer()
   }
 
   function suppressRealtimeAssistantForCommand() {
@@ -289,7 +375,84 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     return outputAudioContext
   }
 
+  function clearMouthFrames() {
+    mouthFrameGeneration += 1
+    mouthFrameTimers.forEach(timer => clearTimeout(timer))
+    mouthFrameTimers.clear()
+    speakingStore.nowSpeaking = false
+    speakingStore.mouthOpenSize = 0
+    speakingStore.mouthForm = 0
+  }
+
+  function scheduleMouthFrame(audioContext: AudioContext, scheduleStartTime: number, offsetSeconds: number, mouthOpen: number, mouthForm: number) {
+    const generation = mouthFrameGeneration
+    const delayMs = Math.max(0, Math.round((scheduleStartTime + offsetSeconds - audioContext.currentTime) * 1000))
+    const timer = setTimeout(() => {
+      mouthFrameTimers.delete(timer)
+      if (generation !== mouthFrameGeneration)
+        return
+
+      speakingStore.nowSpeaking = true
+      speakingStore.mouthOpenSize = mouthOpen
+      speakingStore.mouthForm = mouthForm
+    }, delayMs)
+
+    mouthFrameTimers.add(timer)
+  }
+
+  function stopOutputLipSyncLoop() {
+    if (!outputLipSyncLoopId)
+      return
+
+    cancelAnimationFrame(outputLipSyncLoopId)
+    outputLipSyncLoopId = undefined
+  }
+
+  function startOutputLipSyncLoop() {
+    if (outputLipSyncLoopId)
+      return
+
+    const tick = () => {
+      if (!outputLipSync || activeOutputSources.size === 0) {
+        stopOutputLipSyncLoop()
+        return
+      }
+
+      speakingStore.nowSpeaking = true
+      speakingStore.mouthOpenSize = outputLipSync.getMouthOpen()
+      speakingStore.mouthForm = outputLipSync.getMouthForm()
+      outputLipSyncLoopId = requestAnimationFrame(tick)
+    }
+
+    outputLipSyncLoopId = requestAnimationFrame(tick)
+  }
+
+  async function ensureOutputLipSync(audioContext: AudioContext) {
+    if (outputLipSync)
+      return outputLipSync
+
+    outputLipSyncPromise ??= createLive2DLipSync(audioContext, wlipsyncProfile as Profile, {
+      mouthLerpWindowMs: 70,
+      mouthUpdateIntervalMs: 30,
+    })
+      .then((lipSync) => {
+        outputLipSync = lipSync
+        logVoice('output-lipsync-ready')
+        return lipSync
+      })
+      .catch((error) => {
+        logVoice('output-lipsync-error', { message: errorMessageFrom(error) ?? 'failed to initialize output lip sync' })
+        outputLipSyncPromise = undefined
+        return undefined
+      })
+
+    return outputLipSyncPromise
+  }
+
   function stopPlayback() {
+    const stopped = activeOutputSources.size
+    stopOutputLipSyncLoop()
+    clearMouthFrames()
     activeOutputSources.forEach((source) => {
       try {
         source.stop()
@@ -298,8 +461,8 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     })
     activeOutputSources.clear()
     queuedUntil = outputAudioContext?.currentTime ?? 0
-    speakingStore.nowSpeaking = false
-    speakingStore.mouthOpenSize = 0
+    if (stopped > 0)
+      logVoice('playback-cancelled', { stopped })
   }
 
   function playPcm16(bytes: Uint8Array, sampleRate = 24000) {
@@ -314,19 +477,42 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     const source = audioContext.createBufferSource()
     source.buffer = audioBuffer
     source.connect(audioContext.destination)
+    if (outputLipSync) {
+      outputLipSync.connectSource(source)
+      startOutputLipSyncLoop()
+    }
+    else {
+      void ensureOutputLipSync(audioContext).then((lipSync) => {
+        if (!lipSync || !activeOutputSources.has(source))
+          return
+
+        lipSync.connectSource(source)
+        startOutputLipSyncLoop()
+      })
+    }
 
     const schedule = schedulePcmChunk(audioContext.currentTime, queuedUntil, audioBuffer.duration)
     queuedUntil = schedule.endTime
     activeOutputSources.add(source)
-
-    speakingStore.nowSpeaking = true
-    speakingStore.mouthOpenSize = calculatePcm16Rms(bytes)
+    if (!outputLipSync) {
+      calculatePcm16MouthFrames(bytes, { sampleRate }).forEach((frame) => {
+        scheduleMouthFrame(audioContext, schedule.startTime, frame.startTime, frame.mouthOpen, frame.mouthForm)
+      })
+    }
+    audioChunksPlayed.value += 1
+    if (audioChunksPlayed.value === 1 || audioChunksPlayed.value % 25 === 0) {
+      logVoice('audio-output', {
+        chunks: audioChunksPlayed.value,
+        bytes: bytes.byteLength,
+        queuedMs: Math.round(Math.max(0, queuedUntil - audioContext.currentTime) * 1000),
+      })
+    }
 
     source.addEventListener('ended', () => {
       activeOutputSources.delete(source)
       if (activeOutputSources.size === 0) {
-        speakingStore.nowSpeaking = false
-        speakingStore.mouthOpenSize = 0
+        stopOutputLipSyncLoop()
+        clearMouthFrames()
       }
     }, { once: true })
     source.start(schedule.startTime)
@@ -343,18 +529,27 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     current.workletNode.disconnect()
     current.silentGain.disconnect()
     await current.audioContext.close()
+    attachedStreamRevision = 0
+    logVoice('audio-input-detached')
   }
 
-  async function setupInputAudio(stream: MediaStream) {
-    await cleanupInputAudio()
-
+  async function setupInputAudio(stream: MediaStream, streamRevision: number, generation: number) {
     const audioContext = new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' })
     await audioContext.audioWorklet.addModule(workletUrl)
+    logVoice('audio-worklet-loaded', { streamRevision })
+
+    if (generation !== reconcileGeneration) {
+      await audioContext.close()
+      logVoice('audio-input-stale', { streamRevision })
+      return false
+    }
 
     const mediaStreamSource = audioContext.createMediaStreamSource(stream)
     const workletNode = new AudioWorkletNode(audioContext, 'vad-audio-worklet-processor')
     const silentGain = audioContext.createGain()
     silentGain.gain.value = 0
+
+    await cleanupInputAudio()
 
     workletNode.port.onmessage = ({ data }: MessageEvent<{ buffer?: Float32Array }>) => {
       const buffer = data?.buffer
@@ -362,11 +557,21 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
         return
 
       const pcm16 = float32ToInt16(buffer)
+      audioChunksSent.value += 1
+      if (audioChunksSent.value === 1 || audioChunksSent.value % 100 === 0) {
+        logVoice('audio-input', {
+          chunks: audioChunksSent.value,
+          bytes: pcm16.byteLength,
+        })
+      }
       void appendRealtimeAudio({ pcm16 }).catch((error) => {
         const message = errorMessageFrom(error) ?? 'Failed to send Qwen Omni audio'
         lastError.value = message
-        if (isRealtimeSessionClosedError(message))
+        logVoice('audio-input-error', { message })
+        if (isRealtimeSessionClosedError(message)) {
           sessionActive.value = false
+          setVoiceState('error', 'audio append failed')
+        }
       })
     }
 
@@ -380,6 +585,9 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
       silentGain,
       workletNode,
     }
+    attachedStreamRevision = streamRevision
+    logVoice('audio-input-attached', { streamRevision })
+    return true
   }
 
   async function captureScreenFrame() {
@@ -603,91 +811,86 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     }
   }
 
-  async function handleDemoCommand(text: string) {
-    const command = resolveDemoCommand(text)
-    if (command === 'prototype') {
-      await handlePrototypeCommand(text)
-      return true
-    }
+  async function handleDemoCommand(text: string, resolvedCommand?: QwenOmniCommandKind) {
+    const command = resolvedCommand ?? resolveDemoCommand(text)
+    let runCommand: (() => Promise<void>) | undefined
 
-    if (command === 'email') {
-      await handleEmailCommand(text)
-      return true
-    }
+    if (command === 'prototype')
+      runCommand = () => handlePrototypeCommand(text)
+    else if (command === 'email')
+      runCommand = () => handleEmailCommand(text)
+    else if (command === 'gmail-draft')
+      runCommand = () => handleGmailDraftCommand(text)
+    else if (command === 'calendar-event')
+      runCommand = () => handleCalendarEventCommand(text)
+    else if (command === 'calendar-delete')
+      runCommand = () => handleCalendarDeleteCommand(text)
+    else if (command === 'calendar-update')
+      runCommand = () => handleCalendarUpdateCommand(text)
 
-    if (command === 'gmail-draft') {
-      await handleGmailDraftCommand(text)
-      return true
-    }
+    if (!runCommand)
+      return false
 
-    if (command === 'calendar-event') {
-      await handleCalendarEventCommand(text)
-      return true
-    }
-
-    if (command === 'calendar-delete') {
-      await handleCalendarDeleteCommand(text)
-      return true
-    }
-
-    if (command === 'calendar-update') {
-      await handleCalendarUpdateCommand(text)
-      return true
-    }
-
-    return false
-  }
-
-  async function runTranscriptCommand(text: string) {
-    const finalText = text.trim()
-    if (!finalText || hasHandledCommandText(finalText))
-      return
-
-    lastHandledCommandKey = normalizedCommandKey(finalText)
-    appendHistoryMessage(userMessage(finalText))
+    setVoiceState('command-running', command)
     try {
-      postCaption({ type: 'caption-speaker', text: finalText })
+      await runCommand()
     }
-    catch {}
+    finally {
+      if (voiceState.value === 'command-running')
+        setVoiceState(sessionActive.value ? 'streaming' : 'idle', 'command finished')
+    }
 
-    await handleDemoCommand(finalText)
+    return true
   }
 
-  function scheduleTranscriptCommand(text: string, delayMs = 500) {
-    const finalText = text.trim()
-    if (!finalText || resolveDemoCommand(finalText) === 'chat' || hasHandledCommandText(finalText))
-      return
-
-    suppressRealtimeAssistantForCommand()
-    clearPendingCommandTimer()
-    pendingCommandTimer = setTimeout(() => {
-      pendingCommandTimer = undefined
-      void runTranscriptCommand(finalText)
-    }, delayMs)
-  }
-
-  async function handleInputTranscript(text: string) {
+  async function handleFinalInputTranscript(text: string, turnId?: QwenOmniTurnId) {
     const finalText = text.trim()
     if (!finalText)
       return
 
-    if (hasHandledCommandText(finalText))
+    if (turnId && lastFinalTranscriptTurnId === turnId)
       return
 
-    if (resolveDemoCommand(finalText) !== 'chat') {
-      clearPendingCommandTimer()
+    const command = resolveDemoCommand(finalText)
+    if (command !== 'chat') {
+      const shouldRun = shouldRunQwenOmniCommandForFinalTranscript({
+        final: true,
+        text: finalText,
+        command,
+        turnId,
+        previousTurnId: lastExecutedCommandTurnId,
+        previousText: lastExecutedCommandKey,
+        previousCommand: lastExecutedCommandKind,
+        previousExecutedAt: lastExecutedCommandAt,
+      })
+      if (!shouldRun)
+        return
+
+      lastFinalTranscriptTurnId = turnId
+      lastFinalTranscriptText = finalText
+      markCommandExecuted(finalText, command, turnId)
       suppressRealtimeAssistantForCommand()
-      await runTranscriptCommand(finalText)
+      appendHistoryMessage(userMessage(finalText))
+      try {
+        postCaption({ type: 'caption-speaker', text: finalText })
+      }
+      catch {}
+
+      await handleDemoCommand(finalText, command)
       return
     }
 
+    const finalKey = normalizedCommandKey(finalText)
+    if (lastFinalTranscriptText && finalKey === normalizedCommandKey(lastFinalTranscriptText))
+      return
+
+    lastFinalTranscriptTurnId = turnId
+    lastFinalTranscriptText = finalText
     appendHistoryMessage(userMessage(finalText))
     try {
       postCaption({ type: 'caption-speaker', text: finalText })
     }
     catch {}
-
-    await handleDemoCommand(finalText)
   }
 
   function handleTextDelta(text: string) {
@@ -727,31 +930,42 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     if (!event)
       return
 
+    lastEventAt.value = Date.now()
+    if (event.type !== 'audio-delta')
+      logVoice(`provider:${event.type}`)
+
     switch (event.type) {
       case 'session-created':
       case 'session-updated':
         lastError.value = ''
+        if (sessionActive.value && voiceState.value !== 'command-running')
+          setVoiceState('streaming', event.type)
         return
       case 'speech-started':
         resetPendingInputTranscript()
-        lastHandledCommandKey = ''
+        currentTurnId = nextTurnId()
         clearCommandOverrideSuppression()
         clearVoiceConfirmationSuppression()
         stopPlayback()
         void cancelRealtime()
+        if (sessionActive.value)
+          setVoiceState('streaming', 'speech started')
         return
       case 'speech-stopped':
-        scheduleTranscriptCommand(pendingInputTranscriptPreview || pendingInputTranscript, 450)
+        logVoice('speech-stopped', {
+          hasPreview: Boolean(pendingInputTranscriptPreview || pendingInputTranscript),
+        })
         return
       case 'input-transcript':
         pendingInputTranscript = event.text
         pendingInputTranscriptPreview = event.text
-        void handleInputTranscript(event.text)
+        void handleFinalInputTranscript(event.text, event.turnId ?? currentTurnId)
         return
       case 'response-created':
         if (commandOverrideActive || voiceConfirmationActive)
           return
 
+        setVoiceState('responding', 'response created')
         chatOrchestrator.sending = true
         chatStream.beginStream()
         return
@@ -766,6 +980,8 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
           clearVoiceConfirmationSuppression()
           chatStream.resetStream()
           chatOrchestrator.sending = false
+          if (sessionActive.value)
+            setVoiceState('streaming', 'voice confirmation done')
           return
         }
 
@@ -773,11 +989,15 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
           clearCommandOverrideSuppression()
           chatStream.resetStream()
           chatOrchestrator.sending = false
+          if (sessionActive.value)
+            setVoiceState('streaming', 'command override done')
           return
         }
 
         chatStream.finalizeStream()
         chatOrchestrator.sending = false
+        if (sessionActive.value)
+          setVoiceState('streaming', 'response done')
         return
       case 'error':
         clearCommandOverrideSuppression()
@@ -785,6 +1005,7 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
         lastError.value = event.message
         sessionActive.value = false
         connecting.value = false
+        setVoiceState('error', 'provider error')
         if (event.fatal)
           appendErrorNotice(event.message)
         chatOrchestrator.sending = false
@@ -796,7 +1017,6 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
           if (event.text)
             pendingInputTranscript += event.text
           pendingInputTranscriptPreview = `${pendingInputTranscript}${event.stash}`.trim()
-          scheduleTranscriptCommand(pendingInputTranscriptPreview || pendingInputTranscript, 700)
           const preview = `${event.text}${event.stash}`.trim()
           if (preview)
             postCaption({ type: 'caption-speaker', text: preview })
@@ -830,8 +1050,12 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     realtimeStartPromise = (async () => {
       connecting.value = true
       lastError.value = ''
+      setVoiceState('connecting', options.force ? 'force reconnect' : 'connect')
+      logVoice('realtime-start', { force: Boolean(options.force) })
       await startRealtime({ config: qwenConfig.toConfig() })
       sessionActive.value = true
+      setVoiceState('streaming', 'realtime ready')
+      logVoice('realtime-ready')
     })()
 
     try {
@@ -840,6 +1064,8 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     catch (error) {
       sessionActive.value = false
       lastError.value = errorMessageFrom(error) ?? 'Failed to start Qwen Omni conversation'
+      setVoiceState('error', 'realtime start failed')
+      logVoice('realtime-error', { message: lastError.value })
       throw error
     }
     finally {
@@ -862,29 +1088,107 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
    * - Resolves once the DashScope realtime session has accepted its config
    */
   async function startQwenOmniConversation(stream: MediaStream) {
-    initialize()
-    try {
-      await ensureRealtimeSession()
-      await setupInputAudio(stream)
-    }
-    catch (error) {
-      lastError.value = errorMessageFrom(error) ?? 'Failed to start Qwen Omni conversation'
-      throw error
-    }
+    await reconcileQwenOmniVoice({
+      enabled: true,
+      qwenModeEnabled: true,
+      stream,
+      streamRevision: attachedStreamRevision + 1,
+    })
   }
 
   async function stopQwenOmniConversation() {
+    await resetQwenOmniVoice('legacy stop')
+  }
+
+  async function resetQwenOmniVoice(reason: string) {
+    const generation = reconcileGeneration += 1
+    lastResetReason.value = reason
     sessionActive.value = false
     connecting.value = false
     commandOverrideActive = false
+    setVoiceState('closing', reason)
+    logVoice('reset', { reason })
     clearCommandOverrideSuppression()
     resetPendingInputTranscript()
     clearVoiceConfirmationSuppression()
     stopPlayback()
-    await cleanupInputAudio()
-    await closeRealtime()
-    chatOrchestrator.sending = false
-    chatStream.resetStream()
+    try {
+      await cleanupInputAudio()
+      await closeRealtime()
+    }
+    finally {
+      chatOrchestrator.sending = false
+      chatStream.resetStream()
+      if (generation === reconcileGeneration)
+        setVoiceState('idle', reason)
+    }
+  }
+
+  async function reconcileQwenOmniVoice(inputState: ReconcileVoiceInput) {
+    initialize()
+    const generation = reconcileGeneration += 1
+    const nextInput: QwenOmniVoiceReconcileInput = {
+      enabled: inputState.enabled,
+      qwenModeEnabled: inputState.qwenModeEnabled,
+      configured: qwenConfig.configured,
+      hasStream: Boolean(inputState.stream),
+      streamRevision: inputState.streamRevision,
+    }
+    desiredVoiceInput.value = nextInput
+
+    const decision = resolveQwenOmniVoiceReconcile(voiceSnapshot.value, nextInput)
+    logVoice('reconcile', {
+      decision: decision.state,
+      actions: decision.actions.join(',') || 'none',
+      streamRevision: nextInput.streamRevision,
+    })
+
+    if (decision.actions.includes('close-realtime')) {
+      await resetQwenOmniVoice(inputState.enabled ? 'mode disabled' : 'mic disabled')
+      return
+    }
+
+    if (decision.actions.includes('report-missing-config')) {
+      lastError.value = 'Configure a DashScope API key before enabling Qwen Omni mode'
+      setVoiceState('error', 'missing config')
+      return
+    }
+
+    if (decision.actions.includes('wait-for-mic')) {
+      setVoiceState('acquiring-mic', 'waiting for stream')
+      return
+    }
+
+    try {
+      if (decision.actions.includes('connect-realtime')) {
+        await ensureRealtimeSession()
+        if (generation !== reconcileGeneration)
+          return
+      }
+
+      if (decision.actions.includes('attach-input')) {
+        if (!inputState.stream) {
+          setVoiceState('acquiring-mic', 'stream missing before attach')
+          return
+        }
+
+        const attached = await setupInputAudio(inputState.stream, inputState.streamRevision, generation)
+        if (attached && generation === reconcileGeneration)
+          setVoiceState('streaming', 'input attached')
+      }
+      else {
+        setVoiceState(decision.state, 'reconciled')
+      }
+    }
+    catch (error) {
+      const message = errorMessageFrom(error) ?? 'Failed to start Qwen Omni conversation'
+      lastError.value = message
+      sessionActive.value = false
+      connecting.value = false
+      setVoiceState('error', 'reconcile failed')
+      logVoice('reconcile-error', { message })
+      throw error
+    }
   }
 
   async function sendQwenOmniTextTurn(text: string) {
@@ -933,13 +1237,26 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     await appendRealtimeImage({ imageBase64 })
   }
 
+  watch(voiceSnapshot, (snapshot) => {
+    try {
+      postRuntimeSnapshot(snapshot)
+    }
+    catch {}
+  }, { immediate: true })
+
   return {
     sessionActive,
     connecting,
     processingCommand,
     lastError,
+    voiceState,
+    voiceSnapshot,
+    diagnostics,
+    lastResetReason,
     initialize,
     setDemoHandlers,
+    reconcileQwenOmniVoice,
+    resetQwenOmniVoice,
     startQwenOmniConversation,
     stopQwenOmniConversation,
     sendQwenOmniTextTurn,

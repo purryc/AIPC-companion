@@ -6,6 +6,7 @@ import { ref } from 'vue'
 import {
   useMotionUpdatePluginAutoEyeBlink,
   useMotionUpdatePluginIdleDisable,
+  useMotionUpdatePluginLipSync,
 } from './motion-manager'
 
 vi.mock('./animation', () => ({
@@ -45,6 +46,7 @@ function createContext(overrides: Partial<MotionManagerPluginContext> = {}): Mot
       stopAllMotions: vi.fn(),
       state: { currentGroup: undefined },
       groups: { idle: 'Idle' },
+      lipSyncIds: undefined,
     } as unknown as PixiLive2DInternalModel['motionManager'],
     modelParameters: ref({
       leftEyeOpen: 1,
@@ -178,5 +180,30 @@ describe('live2d motion manager plugins', () => {
     expect(context.model.getParameterValueById('ParamEyeROpen')).toBe(1)
 
     randomSpy.mockRestore()
+  })
+
+  it('writes lip sync to the model-defined LipSync parameter group', () => {
+    const context = createContext({
+      motionManager: {
+        stopAllMotions: vi.fn(),
+        state: { currentGroup: undefined },
+        groups: { idle: 'Idle' },
+        lipSyncIds: ['ParamMouthOpenY', 'ParamJawOpen'],
+      } as unknown as PixiLive2DInternalModel['motionManager'],
+    })
+
+    useMotionUpdatePluginLipSync(ref(0.42), ref(true), ref(-0.25))(context)
+
+    expect(context.model.setParameterValueById).toHaveBeenCalledWith('ParamMouthOpenY', 0.42)
+    expect(context.model.setParameterValueById).toHaveBeenCalledWith('ParamJawOpen', 0.42)
+    expect(context.model.setParameterValueById).toHaveBeenCalledWith('ParamMouthForm', -0.25)
+  })
+
+  it('falls back to ParamMouthOpenY when model settings do not define LipSync parameters', () => {
+    const context = createContext()
+
+    useMotionUpdatePluginLipSync(ref(0.3), ref(true))(context)
+
+    expect(context.model.setParameterValueById).toHaveBeenCalledWith('ParamMouthOpenY', 0.3)
   })
 })

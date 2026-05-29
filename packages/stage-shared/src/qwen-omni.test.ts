@@ -11,8 +11,10 @@ import {
   parseQwenOmniRealtimeProviderEvent,
   QWEN_OMNI_DEFAULT_CONFIG,
   resolveQwenOmniEndpoints,
+  resolveQwenOmniVoiceReconcile,
   routeQwenOmniCommand,
   sanitizeQwenOmniPrototypeHtml,
+  shouldRunQwenOmniCommandForFinalTranscript,
 } from './qwen-omni'
 
 describe('qwen omni shared helpers', () => {
@@ -53,6 +55,170 @@ describe('qwen omni shared helpers', () => {
     expect(routeQwenOmniCommand('把这句文案改成英文')).toBe('chat')
     expect(routeQwenOmniCommand('把这句文案删了')).toBe('chat')
     expect(routeQwenOmniCommand('今天我们聊点轻松的')).toBe('chat')
+  })
+
+  it('resolves Qwen Omni voice reconcile actions without duplicate starts', () => {
+    expect(resolveQwenOmniVoiceReconcile({
+      state: 'idle',
+      enabled: false,
+      qwenModeEnabled: false,
+      configured: true,
+      hasStream: false,
+      streamRevision: 0,
+      sessionActive: false,
+      inputAttached: false,
+    }, {
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: false,
+      streamRevision: 0,
+    })).toEqual({
+      state: 'acquiring-mic',
+      actions: ['wait-for-mic'],
+    })
+
+    expect(resolveQwenOmniVoiceReconcile({
+      state: 'idle',
+      enabled: false,
+      qwenModeEnabled: false,
+      configured: true,
+      hasStream: false,
+      streamRevision: 0,
+      sessionActive: false,
+      inputAttached: false,
+    }, {
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 1,
+    })).toEqual({
+      state: 'connecting',
+      actions: ['connect-realtime', 'attach-input'],
+    })
+
+    expect(resolveQwenOmniVoiceReconcile({
+      state: 'streaming',
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 1,
+      sessionActive: true,
+      inputAttached: true,
+    }, {
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 1,
+    })).toEqual({
+      state: 'streaming',
+      actions: [],
+    })
+
+    expect(resolveQwenOmniVoiceReconcile({
+      state: 'streaming',
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 1,
+      sessionActive: true,
+      inputAttached: true,
+    }, {
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 2,
+    })).toEqual({
+      state: 'streaming',
+      actions: ['attach-input'],
+    })
+
+    expect(resolveQwenOmniVoiceReconcile({
+      state: 'streaming',
+      enabled: true,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 1,
+      sessionActive: true,
+      inputAttached: true,
+    }, {
+      enabled: false,
+      qwenModeEnabled: true,
+      configured: true,
+      hasStream: true,
+      streamRevision: 1,
+    })).toEqual({
+      state: 'closing',
+      actions: ['close-realtime'],
+    })
+  })
+
+  it('only runs side-effect commands for final unique transcripts', () => {
+    expect(shouldRunQwenOmniCommandForFinalTranscript({
+      final: false,
+      text: '帮我明天下午三点加日程',
+      command: 'calendar-event',
+      turnId: 'turn-1',
+      previousTurnId: '',
+      previousText: '',
+      previousCommand: 'chat',
+      previousExecutedAt: 0,
+      now: 10_000,
+    })).toBe(false)
+
+    expect(shouldRunQwenOmniCommandForFinalTranscript({
+      final: true,
+      text: '帮我明天下午三点加日程',
+      command: 'calendar-event',
+      turnId: 'turn-1',
+      previousTurnId: '',
+      previousText: '',
+      previousCommand: 'chat',
+      previousExecutedAt: 0,
+      now: 10_000,
+    })).toBe(true)
+
+    expect(shouldRunQwenOmniCommandForFinalTranscript({
+      final: true,
+      text: '帮我明天下午三点加日程',
+      command: 'calendar-event',
+      turnId: 'turn-1',
+      previousTurnId: 'turn-1',
+      previousText: '帮我明天下午三点加日程',
+      previousCommand: 'calendar-event',
+      previousExecutedAt: 10_000,
+      now: 10_200,
+    })).toBe(false)
+
+    expect(shouldRunQwenOmniCommandForFinalTranscript({
+      final: true,
+      text: '帮我明天下午三点加日程。',
+      command: 'calendar-event',
+      turnId: 'turn-2',
+      previousTurnId: 'turn-1',
+      previousText: '帮我明天下午三点加日程',
+      previousCommand: 'calendar-event',
+      previousExecutedAt: 10_000,
+      now: 10_400,
+    })).toBe(false)
+
+    expect(shouldRunQwenOmniCommandForFinalTranscript({
+      final: true,
+      text: '你好',
+      command: 'chat',
+      turnId: 'turn-3',
+      previousTurnId: 'turn-2',
+      previousText: '帮我明天下午三点加日程',
+      previousCommand: 'calendar-event',
+      previousExecutedAt: 10_000,
+      now: 20_000,
+    })).toBe(false)
   })
 
   it('sanitizes prototype iframe payloads', () => {

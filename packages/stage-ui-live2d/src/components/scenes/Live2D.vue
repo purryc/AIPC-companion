@@ -19,12 +19,14 @@ const props = withDefaults(defineProps<{
   modelId?: string
 
   paused?: boolean
+  mouthForm?: number
   mouthOpenSize?: number
   nowSpeaking?: boolean
   themeColorsHue?: number
   themeColorsHueDynamic?: boolean
 }>(), {
   paused: false,
+  mouthForm: 0,
   mouthOpenSize: 0,
   nowSpeaking: false,
   themeColorsHue: 220.44,
@@ -109,6 +111,7 @@ defineExpose({
         :model-src="modelSrc"
         :model-id="modelId"
         :app="app"
+        :mouth-form="mouthForm"
         :mouth-open-size="mouthOpenSize"
         :now-speaking="nowSpeaking"
         :width="width"

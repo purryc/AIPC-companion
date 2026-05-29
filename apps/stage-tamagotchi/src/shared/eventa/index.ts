@@ -1,6 +1,10 @@
 import type { Locale } from '@intlify/core'
 import type { ServerOptions } from '@proj-airi/server-runtime/server'
 import type {
+  DesktopContextPermissionRequest,
+  DesktopContextPermissionResult,
+  DesktopContextRequest,
+  DesktopContextSnapshot,
   QwenOmniAudioPayload,
   QwenOmniCalendarEventDeleteRequestPayload,
   QwenOmniCalendarEventDeleteResult,
@@ -54,6 +58,8 @@ export const electronSettingsNavigate = defineEventa<{ route: string }>('eventa:
 export const electronOpenChat = defineInvokeEventa('eventa:invoke:electron:windows:chat:open')
 export const electronOpenSettingsDevtools = defineInvokeEventa('eventa:invoke:electron:windows:settings:devtools:open')
 export const electronOpenDevtoolsWindow = defineInvokeEventa<void, { key: string, route?: string, width?: number, height?: number, x?: number, y?: number }>('eventa:invoke:electron:windows:devtools:open')
+export const electronDesktopContextGetSnapshot = defineInvokeEventa<DesktopContextSnapshot, DesktopContextRequest>('eventa:invoke:electron:desktop-context:get-snapshot')
+export const electronDesktopContextRequestPermission = defineInvokeEventa<DesktopContextPermissionResult, DesktopContextPermissionRequest>('eventa:invoke:electron:desktop-context:request-permission')
 
 export interface ElectronServerChannelConfig {
   tlsConfig?: ServerOptions['tlsConfig'] | null

@@ -40,6 +40,8 @@ export type MotionManagerPluginContext = MotionManagerUpdateContext & {
 
 export type MotionManagerPlugin = (ctx: MotionManagerPluginContext) => void
 
+const fallbackLipSyncParameterIds = ['ParamMouthOpenY']
+
 export interface UseLive2DMotionManagerUpdateOptions {
   internalModel: PixiLive2DInternalModel
   motionManager: PixiLive2DInternalModel['motionManager']
@@ -466,21 +468,38 @@ export function useMotionUpdatePluginExpression(
 export function useMotionUpdatePluginLipSync(
   mouthOpenSize: Ref<number>,
   nowSpeaking: Ref<boolean>,
+  mouthForm?: Ref<number>,
 ): MotionManagerPlugin {
   // 200 ms covers a typical phoneme tail without lagging behind the next utterance.
   const RELEASE_DURATION_MS = 200
 
   let releaseRemainingMs = 0
   let lastForcedValue = 0
+  let lastForcedFormValue = 0
 
   // Smoothstep: 3t^2 - 2t^3, eases in/out with zero slope at endpoints.
   const smoothstep = (t: number) => t * t * (3 - 2 * t)
+  const lipSyncParameterIds = (ctx: MotionManagerPluginContext) => {
+    const ids = (ctx.motionManager as { lipSyncIds?: string[] }).lipSyncIds
+    return ids?.length ? ids : fallbackLipSyncParameterIds
+  }
+  const setLipSyncParameterValue = (ctx: MotionManagerPluginContext, value: number) => {
+    lipSyncParameterIds(ctx).forEach((parameterId) => {
+      ctx.model.setParameterValueById(parameterId, value)
+    })
+  }
+  const getPrimaryLipSyncParameterValue = (ctx: MotionManagerPluginContext) => {
+    const [parameterId] = lipSyncParameterIds(ctx)
+    return ctx.model.getParameterValueById(parameterId ?? fallbackLipSyncParameterIds[0]!) as number
+  }
 
   return (ctx) => {
     if (nowSpeaking.value) {
       lastForcedValue = mouthOpenSize.value
+      lastForcedFormValue = mouthForm?.value ?? 0
       releaseRemainingMs = RELEASE_DURATION_MS
-      ctx.model.setParameterValueById('ParamMouthOpenY', mouthOpenSize.value)
+      setLipSyncParameterValue(ctx, mouthOpenSize.value)
+      ctx.model.setParameterValueById('ParamMouthForm', lastForcedFormValue)
       return
     }
 
@@ -490,10 +509,13 @@ export function useMotionUpdatePluginLipSync(
     releaseRemainingMs = Math.max(0, releaseRemainingMs - ctx.timeDelta * 1000)
     const blend = smoothstep(1 - releaseRemainingMs / RELEASE_DURATION_MS)
 
-    // ParamMouthOpenY was already written by motion + expression plugins this frame.
-    const motionValue = ctx.model.getParameterValueById('ParamMouthOpenY') as number
+    // LipSync parameters were already written by motion + expression plugins this frame.
+    const motionValue = getPrimaryLipSyncParameterValue(ctx)
     const blended = lastForcedValue * (1 - blend) + motionValue * blend
+    const motionFormValue = ctx.model.getParameterValueById('ParamMouthForm') as number
+    const blendedForm = lastForcedFormValue * (1 - blend) + motionFormValue * blend
 
-    ctx.model.setParameterValueById('ParamMouthOpenY', blended)
+    setLipSyncParameterValue(ctx, blended)
+    ctx.model.setParameterValueById('ParamMouthForm', blendedForm)
   }
 }

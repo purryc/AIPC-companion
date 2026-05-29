@@ -1,6 +1,10 @@
 import type { Profile } from 'wlipsync'
 
+import type { VowelKey } from './mouth-form'
+
 import { createWLipSyncNode } from 'wlipsync'
+
+import { getMouthFormFromVowelWeights } from './mouth-form'
 
 const RAW_KEYS = ['A', 'E', 'I', 'O', 'U', 'S'] as const
 const RAW_TO_VOWEL: Record<typeof RAW_KEYS[number], VowelKey> = {
@@ -13,7 +17,7 @@ const RAW_TO_VOWEL: Record<typeof RAW_KEYS[number], VowelKey> = {
   S: 'I',
 }
 
-export type VowelKey = 'A' | 'E' | 'I' | 'O' | 'U'
+export type { VowelKey } from './mouth-form'
 
 export interface Live2DLipSync {
   /**
@@ -28,6 +32,11 @@ export interface Live2DLipSync {
    * Get a single mouth-open value (0-1) derived from the loudest vowel weight.
    */
   getMouthOpen: () => number
+  /**
+   * Get a Live2D ParamMouthForm-friendly value (-1 to 1).
+   * Positive values read wider/smiling; negative values read rounder.
+   */
+  getMouthForm: () => number
   /**
    * Convenience helper to connect an audio source node to the lip sync node.
    */
@@ -62,11 +71,13 @@ export interface Live2DLipSyncOptions {
   mouthLerpWindowMs?: number
 }
 
+export { getMouthFormFromVowelWeights } from './mouth-form'
+
 /**
  * Create a Live2D-friendly lip sync helper using the wLipSync worklet.
  * - Compute AEIOUS weights from the worklet
  * - Remap to AEIOU
- * - Scale by volume to derive a mouth-open value
+ * - Scale by volume to derive mouth-open and mouth-form values
  */
 export async function createLive2DLipSync(
   audioContext: AudioContext,
@@ -139,6 +150,8 @@ export async function createLive2DLipSync(
     return getSmoothedMouthOpen(timestamp)
   }
 
+  const getMouthForm = () => getMouthFormFromVowelWeights(getVowelWeights())
+
   const connectSource = (source: AudioNode) => {
     try {
       source.connect(node)
@@ -152,6 +165,7 @@ export async function createLive2DLipSync(
     node,
     getVowelWeights,
     getMouthOpen,
+    getMouthForm,
     connectSource,
   }
 }

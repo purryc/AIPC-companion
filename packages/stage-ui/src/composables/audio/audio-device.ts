@@ -6,7 +6,7 @@ export function useAudioDevice(requestPermission: boolean = false) {
   const selectedAudioInput = ref<string>(audioInputs.value.find(device => device.deviceId === 'default')?.deviceId || '')
   const deviceConstraints = computed<MediaStreamConstraints>(() => ({
     audio: {
-      deviceId: { exact: selectedAudioInput.value },
+      ...(selectedAudioInput.value ? { deviceId: { exact: selectedAudioInput.value } } : {}),
       autoGainControl: true,
       echoCancellation: true,
       noiseSuppression: true,

@@ -34,6 +34,7 @@ const props = withDefaults(defineProps<{
   modelId?: string
 
   app?: Application
+  mouthForm?: number
   mouthOpenSize?: number
   nowSpeaking?: boolean
   width: number
@@ -51,6 +52,7 @@ const props = withDefaults(defineProps<{
   live2dExpressionEnabled?: boolean
   live2dShadowEnabled?: boolean
 }>(), {
+  mouthForm: 0,
   mouthOpenSize: 0,
   nowSpeaking: false,
   paused: false,
@@ -96,6 +98,7 @@ const focusAt = toRef(() => props.focusAt)
 const model = ref<Live2DModel<PixiLive2DInternalModel>>()
 const initialModelWidth = ref<number>(0)
 const initialModelHeight = ref<number>(0)
+const mouthForm = computed(() => Math.max(-1, Math.min(1, props.mouthForm)))
 const mouthOpenSize = computed(() => Math.max(0, Math.min(100, props.mouthOpenSize)))
 const nowSpeaking = toRef(() => props.nowSpeaking)
 const lastUpdateTime = ref(0)
@@ -359,7 +362,7 @@ async function loadModel() {
     // This ensures blink respects expression state (0 × blinkFactor = 0).
     motionManagerUpdate.register(useMotionUpdatePluginExpression(expressionController), 'final')
     motionManagerUpdate.register(useMotionUpdatePluginAutoEyeBlink(live2dExpressionEnabled), 'final')
-    motionManagerUpdate.register(useMotionUpdatePluginLipSync(mouthOpenSize, nowSpeaking), 'final')
+    motionManagerUpdate.register(useMotionUpdatePluginLipSync(mouthOpenSize, nowSpeaking, mouthForm), 'final')
 
     const hookedUpdate = motionManager.update as (model: PixiLive2DInternalModel['coreModel'], now: number) => boolean
     motionManager.update = function (model: PixiLive2DInternalModel['coreModel'], now: number) {
