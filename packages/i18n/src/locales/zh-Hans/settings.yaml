@@ -453,6 +453,9 @@ pages:
           description: 配置 3D VRM 模型
         scene: 场景
   modules:
+    qwen_omni:
+      description: 用一个通义千问 Omni API 驱动实时语音和看屏幕 Demo
+      title: Qwen Omni
     beat_sync:
       description: 随音源节拍律动
       title: 同步音律

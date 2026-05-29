@@ -26,6 +26,7 @@ import { useAudioRecorder } from '@proj-airi/stage-ui/composables/audio/audio-re
 import { useCanvasPixelIsTransparentAtPoint } from '@proj-airi/stage-ui/composables/canvas-alpha'
 import { useVAD } from '@proj-airi/stage-ui/stores/ai/models/vad'
 import { useHearingSpeechInputPipeline } from '@proj-airi/stage-ui/stores/modules/hearing'
+import { useQwenOmniStore } from '@proj-airi/stage-ui/stores/modules/qwen-omni'
 import { useOnboardingStore } from '@proj-airi/stage-ui/stores/onboarding'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
 import { refDebounced, useBroadcastChannel } from '@vueuse/core'
@@ -38,8 +39,10 @@ import StatusIsland from '../components/stage-islands/status-island/index.vue'
 
 import { electronOpenOnboarding } from '../../shared/eventa'
 import { modelSettingsRuntimeSnapshotChannelName } from '../../shared/model-settings-runtime'
+import { useVisionScreenCapture } from '../composables/use-vision-screen-capture'
 import { useChatSyncStore } from '../stores/chat-sync'
 import { useControlsIslandStore } from '../stores/controls-island'
+import { useTamagotchiQwenOmniStore } from '../stores/qwen-omni'
 import { useStageWindowLifecycleStore } from '../stores/stage-window-lifecycle'
 import { shouldSampleStageTransparency } from '../utils/stage-three-transparency'
 
@@ -241,7 +244,13 @@ const hearingPipeline = useHearingSpeechInputPipeline()
 const { transcribeForRecording, transcribeForMediaStream, stopStreamingTranscription } = hearingPipeline
 const { supportsStreamInput } = storeToRefs(hearingPipeline)
 const chatSyncStore = useChatSyncStore()
-const shouldUseStreamInput = computed(() => supportsStreamInput.value && !!stream.value)
+const qwenOmniConfigStore = useQwenOmniStore()
+const { qwenOmniModeEnabled } = storeToRefs(qwenOmniConfigStore)
+const qwenOmniRuntimeStore = useTamagotchiQwenOmniStore()
+const shouldUseStreamInput = computed(() => !qwenOmniModeEnabled.value && supportsStreamInput.value && !!stream.value)
+
+const qwenScreenVideoRef = ref<HTMLVideoElement>()
+const qwenScreenCapture = useVisionScreenCapture({ types: ['screen', 'window'] })
 
 const { init: initVAD, dispose: disposeVAD, start: startVAD, loaded: vadLoaded } = useVAD(workletUrl, {
   threshold: ref(0.6),
@@ -261,6 +270,57 @@ type CaptionChannelEvent
   = | { type: 'caption-speaker', text: string }
     | { type: 'caption-assistant', text: string }
 const { post: postCaption } = useBroadcastChannel<CaptionChannelEvent, CaptionChannelEvent>({ name: 'airi-caption-overlay' })
+
+function waitForVideoFrame(video: HTMLVideoElement) {
+  if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0)
+    return Promise.resolve()
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      reject(new Error('Timed out waiting for screen capture video frame'))
+    }, 3000)
+
+    const onReady = () => {
+      if (video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0)
+        return
+
+      cleanup()
+      resolve()
+    }
+
+    function cleanup() {
+      clearTimeout(timeout)
+      video.removeEventListener('loadedmetadata', onReady)
+      video.removeEventListener('canplay', onReady)
+      video.removeEventListener('playing', onReady)
+    }
+
+    video.addEventListener('loadedmetadata', onReady)
+    video.addEventListener('canplay', onReady)
+    video.addEventListener('playing', onReady)
+  })
+}
+
+async function captureQwenScreenFrame() {
+  await qwenScreenCapture.refetchSources()
+  const captureStream = await qwenScreenCapture.startStream()
+  const video = qwenScreenVideoRef.value
+  if (!video)
+    throw new Error('Qwen screen capture video is not mounted')
+
+  if (video.srcObject !== captureStream)
+    video.srcObject = captureStream
+
+  await video.play()
+  await waitForVideoFrame(video)
+  return qwenScreenCapture.captureFrame(video)
+}
+
+qwenOmniRuntimeStore.initialize()
+qwenOmniRuntimeStore.setDemoHandlers({
+  captureScreenFrame: captureQwenScreenFrame,
+})
 
 function handleStreamingSentenceEnd(delta: string) {
   console.info('[Main Page] Received transcription delta:', delta)
@@ -321,6 +381,17 @@ async function startAudioInteraction() {
   audioInteractionStarting.value = true
   try {
     console.info('[Main Page] Starting audio interaction...')
+
+    if (qwenOmniModeEnabled.value) {
+      if (!stream.value) {
+        console.warn('[Main Page] Qwen Omni mode is enabled, but no microphone stream is available yet')
+        return
+      }
+
+      await qwenOmniRuntimeStore.startQwenOmniConversation(stream.value)
+      console.info('[Main Page] Qwen Omni realtime conversation started')
+      return
+    }
 
     initVAD().then(() => {
       if (stream.value) {
@@ -400,6 +471,7 @@ function stopAudioInteraction() {
     stopOnStopRecord?.()
     stopOnStopRecord = undefined
     audioInteractionStarting.value = false
+    void qwenOmniRuntimeStore.stopQwenOmniConversation()
     void stopStreamingTranscription(true)
     disposeVAD()
   })
@@ -416,6 +488,12 @@ watch(enabled, async (val) => {
   }
 }, { immediate: true })
 
+watch(qwenOmniModeEnabled, async () => {
+  stopAudioInteraction()
+  if (enabled.value && stream.value)
+    await startAudioInteraction()
+})
+
 onMounted(() => {
   if (onboardingStore.needsOnboarding) {
     openOnboarding()
@@ -427,6 +505,7 @@ onUnmounted(() => {
     type: 'owner-gone',
     ownerInstanceId: modelSettingsRuntimeOwnerInstanceId,
   })
+  qwenScreenCapture.cleanup()
   stopAudioInteraction()
 })
 
@@ -439,10 +518,16 @@ watch(stream, async (currentStream) => {
   // but any existing transcription transport is still bound to the old one. Always allow the page to
   // re-run `startAudioInteraction()` for a newly available stream unless startup is already underway.
   console.info('[Main Page] Stream became available, ensuring audio interaction is started')
+  if (qwenOmniModeEnabled.value)
+    await qwenOmniRuntimeStore.stopQwenOmniConversation()
+
   await startAudioInteraction()
 })
 
 watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
+  if (qwenOmniModeEnabled.value)
+    return
+
   if (enabled.value && loaded && s) {
     try {
       await startVAD(s)
@@ -462,6 +547,13 @@ const cursorPosition = computed(() => ({
 </script>
 
 <template>
+  <video
+    ref="qwenScreenVideoRef"
+    class="pointer-events-none fixed left-0 top-0 h-px w-px opacity-0"
+    autoplay
+    muted
+    playsinline
+  />
   <div
     max-h="[100vh]"
     max-w="[100vw]"

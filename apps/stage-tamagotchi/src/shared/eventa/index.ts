@@ -1,6 +1,19 @@
 import type { Locale } from '@intlify/core'
 import type { ServerOptions } from '@proj-airi/server-runtime/server'
 import type {
+  QwenOmniAudioPayload,
+  QwenOmniEmailDraftRequestPayload,
+  QwenOmniEmailDraftResult,
+  QwenOmniImagePayload,
+  QwenOmniPasteTextPayload,
+  QwenOmniPasteTextResult,
+  QwenOmniPrototypeRequestPayload,
+  QwenOmniPrototypeResult,
+  QwenOmniRealtimeEvent,
+  QwenOmniRealtimeStartPayload,
+  QwenOmniTextPayload,
+} from '@proj-airi/stage-shared'
+import type {
   ShortcutBinding,
   ShortcutRegistrationResult,
 } from '@proj-airi/stage-shared/global-shortcut'
@@ -270,6 +283,17 @@ export const widgetsUpdate = defineInvokeEventa<void, WidgetsUpdatePayload>('eve
 export const widgetsFetch = defineInvokeEventa<WidgetSnapshot | void, { id: string }>('eventa:invoke:electron:windows:widgets:fetch')
 export const widgetsPrepareWindow = defineInvokeEventa<string | undefined, { id?: string }>('eventa:invoke:electron:windows:widgets:prepare')
 export const widgetsIframePublish = defineInvokeEventa<void, { id: string, event: Record<string, unknown> }>('eventa:invoke:electron:windows:widgets:iframe-publish')
+
+export const qwenOmniRealtimeStart = defineInvokeEventa<void, QwenOmniRealtimeStartPayload>('eventa:invoke:electron:qwen-omni:realtime:start')
+export const qwenOmniRealtimeAppendAudio = defineInvokeEventa<void, QwenOmniAudioPayload>('eventa:invoke:electron:qwen-omni:realtime:audio:append')
+export const qwenOmniRealtimeAppendImage = defineInvokeEventa<void, QwenOmniImagePayload>('eventa:invoke:electron:qwen-omni:realtime:image:append')
+export const qwenOmniRealtimeSendText = defineInvokeEventa<void, QwenOmniTextPayload>('eventa:invoke:electron:qwen-omni:realtime:text:send')
+export const qwenOmniRealtimeCancel = defineInvokeEventa<void>('eventa:invoke:electron:qwen-omni:realtime:cancel')
+export const qwenOmniRealtimeClose = defineInvokeEventa<void>('eventa:invoke:electron:qwen-omni:realtime:close')
+export const qwenOmniGeneratePrototype = defineInvokeEventa<QwenOmniPrototypeResult, QwenOmniPrototypeRequestPayload>('eventa:invoke:electron:qwen-omni:prototype:generate')
+export const qwenOmniDraftEmail = defineInvokeEventa<QwenOmniEmailDraftResult, QwenOmniEmailDraftRequestPayload>('eventa:invoke:electron:qwen-omni:email:draft')
+export const qwenOmniPasteText = defineInvokeEventa<QwenOmniPasteTextResult, QwenOmniPasteTextPayload>('eventa:invoke:electron:qwen-omni:paste-text')
+export const qwenOmniRealtimeEvent = defineEventa<QwenOmniRealtimeEvent>('eventa:event:electron:qwen-omni:realtime')
 
 export const electronWindowClose = defineInvokeEventa<void>('eventa:invoke:electron:window:close')
 export type ElectronWindowLifecycleReason

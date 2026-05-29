@@ -9,10 +9,12 @@ import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/mainten
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
+import { useQwenOmniStore } from '@proj-airi/stage-ui/stores/modules/qwen-omni'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { defineStore, storeToRefs } from 'pinia'
 import { ref, watch } from 'vue'
 
+import { useTamagotchiQwenOmniStore } from './qwen-omni'
 import { imageJournalTools } from './tools/builtin/image-journal'
 import { weatherTools } from './tools/builtin/weather'
 import { widgetsTools } from './tools/builtin/widgets'
@@ -168,6 +170,8 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
   const { cleanupMessages } = useChatMaintenanceStore()
   const providersStore = useProvidersStore()
   const consciousnessStore = useConsciousnessStore()
+  const qwenOmniConfigStore = useQwenOmniStore()
+  const qwenOmniRuntimeStore = useTamagotchiQwenOmniStore()
   const { activeProvider, activeModel } = storeToRefs(consciousnessStore)
   const { activeSessionId, sessionMessages, sessionMetas } = storeToRefs(chatSession)
   const { streamingMessage } = storeToRefs(chatStream)
@@ -300,6 +304,11 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
   }
 
   async function executeIngest(payload: IngestCommandPayload) {
+    if (qwenOmniConfigStore.qwenOmniModeEnabled) {
+      await qwenOmniRuntimeStore.sendQwenOmniTextTurn(payload.text)
+      return
+    }
+
     const providerId = activeProvider.value
     const modelId = activeModel.value
     if (!providerId || !modelId) {

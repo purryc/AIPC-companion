@@ -453,6 +453,9 @@ pages:
           description: Configurer les modèles et paramètres 3D VRM
         scene: Scène
   modules:
+    qwen_omni:
+      description: Realtime voice plus screen-aware Qwen demos
+      title: Qwen Omni
     beat_sync:
       description: Vibrez au rythme de la source audio
       title: Synchronisation du rythme (Beat Sync)

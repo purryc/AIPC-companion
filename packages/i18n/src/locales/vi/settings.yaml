@@ -453,6 +453,9 @@ pages:
           description: Cấu hình mô hình 3D VRM
         scene: Bối cảnh
   modules:
+    qwen_omni:
+      description: Realtime voice plus screen-aware Qwen demos
+      title: Qwen Omni
     beat_sync:
       description: Rung cảm với nhịp điệu từ nguồn âm thanh
       title: Đồng bộ nhịp

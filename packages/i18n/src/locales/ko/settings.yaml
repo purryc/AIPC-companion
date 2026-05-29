@@ -453,6 +453,9 @@ pages:
           description: 3D VRM 모델 및 설정 구성
         scene: 장면
   modules:
+    qwen_omni:
+      description: Realtime voice plus screen-aware Qwen demos
+      title: Qwen Omni
     beat_sync:
       description: 오디오 소스의 비트가 있는 바이브
       title: 비트 동기화

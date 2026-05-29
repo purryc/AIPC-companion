@@ -70,6 +70,7 @@ catalog:
   '@types/audioworklet': ^0.0.97
   '@types/d3': ^7.4.3
   '@types/hast': ^3.0.4
+  '@types/node': ^24.12.2
   '@types/splitpanes': ^2.2.6
   '@types/unist': ^3.0.3
   '@types/whatwg-mimetype': ^5.0.0

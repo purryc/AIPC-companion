@@ -453,6 +453,9 @@ pages:
           description: 3D VRMモデルと設定を構成
         scene: シーン
   modules:
+    qwen_omni:
+      description: Realtime voice plus screen-aware Qwen demos
+      title: Qwen Omni
     beat_sync:
       description: オーディオソースのビートに合わせて雰囲気を出す
       title: ビート同期

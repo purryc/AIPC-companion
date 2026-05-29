@@ -453,6 +453,9 @@ pages:
           description: 設定 3D VRM 模型與相關選項
         scene: 場景
   modules:
+    qwen_omni:
+      description: 使用一個通義千問 Omni API 驅動即時語音與看螢幕 Demo
+      title: Qwen Omni
     beat_sync:
       description: 依據音訊來源的節奏同步互動
       title: 節拍同步

@@ -10,6 +10,7 @@ import { isMacOS } from 'std-env'
 
 import { createServerChannelService } from '../../services/airi/channel-server'
 import { createI18nService } from '../../services/airi/i18n'
+import { createQwenOmniService } from '../../services/airi/qwen-omni'
 import { createAppService, createPowerMonitorService, createScreenService, createWindowService } from '../../services/electron'
 
 export function toggleWindowShow(window?: BrowserWindow | null): void {
@@ -100,6 +101,7 @@ export async function setupBaseWindowElectronInvokes(params: {
   createWindowService({ context: params.context, window: params.window })
   createAppService({ context: params.context, window: params.window })
   createPowerMonitorService({ context: params.context, window: params.window })
+  createQwenOmniService({ context: params.context })
 
   await createI18nService({ context: params.context, window: params.window, i18n: params.i18n })
 

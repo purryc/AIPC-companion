@@ -167,6 +167,7 @@ const Registry: Record<string, ReturnType<typeof defineAsyncComponent>> = {
   'map': defineAsyncComponent(async () => (await import('../widgets/map')).Map),
   'weather': defineAsyncComponent(async () => (await import('../widgets/weather')).Weather),
   'artistry': defineAsyncComponent(async () => (await import('../widgets/artistry')).Artistry),
+  'prototype-preview': defineAsyncComponent(async () => (await import('../widgets/prototype-preview')).PrototypePreview),
 }
 
 const GenericWidget = defineComponent({
