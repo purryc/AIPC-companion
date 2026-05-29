@@ -1,15 +1,27 @@
 import type { createContext } from '@moeru/eventa/adapters/electron/main'
 import type {
+  QwenOmniCalendarEventContext,
+  QwenOmniCalendarEventDeleteRequestPayload,
+  QwenOmniCalendarEventDeleteResult,
+  QwenOmniCalendarEventRequestPayload,
+  QwenOmniCalendarEventResult,
+  QwenOmniCalendarEventUpdateRequestPayload,
+  QwenOmniCalendarEventUpdateResult,
   QwenOmniConfig,
   QwenOmniEmailDraftRequestPayload,
   QwenOmniEmailDraftResult,
+  QwenOmniGmailDraftRequestPayload,
+  QwenOmniGmailDraftResult,
   QwenOmniPrototypeRequestPayload,
   QwenOmniPrototypeResult,
   QwenOmniRealtimeEvent,
 } from '@proj-airi/stage-shared'
 
+import process from 'node:process'
+
 import { Buffer } from 'node:buffer'
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 
 import WebSocket from 'ws'
 
@@ -17,7 +29,11 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import { errorMessageFrom } from '@moeru/std'
 import {
   normalizeQwenOmniConfig,
+  parseQwenOmniCalendarEventDeletePlanResponse,
+  parseQwenOmniCalendarEventPlanResponse,
+  parseQwenOmniCalendarEventUpdatePlanResponse,
   parseQwenOmniEmailDraftResponse,
+  parseQwenOmniGmailDraftPlanResponse,
   parseQwenOmniPrototypeResponse,
   parseQwenOmniRealtimeProviderEvent,
   resolveQwenOmniEndpoints,
@@ -26,6 +42,9 @@ import { clipboard } from 'electron'
 import { isMacOS } from 'std-env'
 
 import {
+  qwenOmniCreateCalendarEvent,
+  qwenOmniCreateGmailDraft,
+  qwenOmniDeleteCalendarEvent,
   qwenOmniDraftEmail,
   qwenOmniGeneratePrototype,
   qwenOmniPasteText,
@@ -36,6 +55,7 @@ import {
   qwenOmniRealtimeEvent,
   qwenOmniRealtimeSendText,
   qwenOmniRealtimeStart,
+  qwenOmniUpdateCalendarEvent,
 } from '../../../../shared/eventa'
 
 type MainEventaContext = ReturnType<typeof createContext>['context']
@@ -78,6 +98,7 @@ const DEFAULT_INSTRUCTIONS = [
   'You are AIRI, a warm desktop companion.',
   'Reply conversationally and concisely.',
   'When the user asks you to inspect a sketch, screen, or email, wait for the app workflow instead of inventing unseen details.',
+  'When the user asks to create Gmail drafts, write email, add, update, or delete calendar events, record schedules, or create reminders, do not claim completion; the desktop app will handle the native action.',
 ].join('\n')
 
 const QUIET_REALTIME_EVENTS = new Set([
@@ -103,6 +124,48 @@ const EMAIL_SYSTEM_PROMPT = [
   'If visual context is incomplete, write a cautious, editable draft and mention the assumption in summary.',
 ].join('\n')
 
+const GMAIL_DRAFT_SYSTEM_PROMPT = [
+  'You turn a user request into a Gmail draft.',
+  'Return only valid JSON with keys: to, cc, bcc, subject, body, summary, missing.',
+  'to, cc, bcc, and missing must be arrays of strings.',
+  'Only include recipient email addresses that are explicitly present in the user request.',
+  'If the user gives only a name without an email address, leave to empty and add "recipient email" to missing.',
+  'Never send email. This workflow creates a Gmail draft only.',
+].join('\n')
+
+const CALENDAR_EVENT_SYSTEM_PROMPT = [
+  'You turn a user request into a Google Calendar event.',
+  'Return only valid JSON with keys: title, from, to, timezone, attendees, location, description, withMeet, summary, missing.',
+  'from and to must be RFC3339 timestamps with timezone offsets.',
+  'attendees and missing must be arrays of strings.',
+  'Only include attendee email addresses explicitly present in the user request.',
+  'If the user asks for Google Meet or video call, set withMeet to true.',
+  'If duration is missing, use 30 minutes for calls or meetings and 1 hour for general events, then mention that assumption in summary.',
+  'If date, start time, or title cannot be inferred, add the missing field name to missing.',
+].join('\n')
+
+const CALENDAR_EVENT_UPDATE_SYSTEM_PROMPT = [
+  'You update one existing Google Calendar event from the user request.',
+  'Return only valid JSON with keys: calendarId, eventId, title, from, to, timezone, location, description, attendees, addAttendees, withMeet, summary, missing.',
+  'Use provided candidates to identify the target event. Prefer recentEvent when the user says "刚才", "这个", or gives only a title/text replacement.',
+  'If the user asks to replace text in a title, return the complete new title in title.',
+  'Do not invent attendee emails. If only a person name is provided, update title or description, not attendees.',
+  'Leave fields empty when they should not change.',
+  'If no target event can be identified, leave eventId empty and add "target event" to missing.',
+].join('\n')
+
+const CALENDAR_EVENT_DELETE_SYSTEM_PROMPT = [
+  'You delete one existing Google Calendar event from the user request.',
+  'Return only valid JSON with keys: calendarId, eventId, title, from, to, summary, missing.',
+  'Use provided candidateEvents to identify the target event. Match by date, time, and title.',
+  'Prefer exact time matches such as "下午5点" = 17:00 local time.',
+  'Only choose an eventId when exactly one candidate clearly matches the user request.',
+  'If no unique target event can be identified, leave eventId empty and add "target event" to missing.',
+].join('\n')
+
+const DEFAULT_CALENDAR_ID = 'primary'
+const GOG_DEFAULT_PATH = '/opt/homebrew/bin/gog'
+
 let realtimeSession: RealtimeSessionState | undefined
 let realtimeStartPromise: Promise<void> | undefined
 let realtimeEventId = 0
@@ -127,6 +190,105 @@ function safeJsonParse(text: string): Record<string, unknown> | undefined {
   catch {
     return undefined
   }
+}
+
+function safeJsonParseUnknown(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  }
+  catch {
+    return undefined
+  }
+}
+
+function localRuntimeContext() {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Toronto'
+
+  return [
+    `Current date/time: ${new Date().toISOString()}`,
+    `Local timezone: ${timezone}`,
+  ].join('\n')
+}
+
+function resolveGogBin() {
+  const configured = process.env.GOG_BIN?.trim()
+  if (configured)
+    return configured
+
+  return existsSync(GOG_DEFAULT_PATH) ? GOG_DEFAULT_PATH : 'gog'
+}
+
+function uniqueNonEmpty(values: Array<string | undefined>) {
+  return [...new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))]
+}
+
+function findNestedStringField(value: unknown, keys: string[]): string | undefined {
+  const wanted = new Set(keys.map(key => key.toLowerCase()))
+
+  function visit(current: unknown): string | undefined {
+    if (Array.isArray(current)) {
+      for (const item of current) {
+        const found = visit(item)
+        if (found)
+          return found
+      }
+      return undefined
+    }
+
+    if (!current || typeof current !== 'object')
+      return undefined
+
+    const record = current as Record<string, unknown>
+    for (const [key, item] of Object.entries(record)) {
+      if (wanted.has(key.toLowerCase()) && typeof item === 'string' && item.trim())
+        return item.trim()
+    }
+
+    for (const item of Object.values(record)) {
+      const found = visit(item)
+      if (found)
+        return found
+    }
+
+    return undefined
+  }
+
+  return visit(value)
+}
+
+function clippedRawOutput(stdout: string, stderr: string) {
+  const raw = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n')
+  return raw ? raw.slice(0, 5000) : undefined
+}
+
+function gogBaseArgs(account?: string) {
+  const trimmedAccount = account?.trim()
+  return [
+    '--json',
+    '--results-only',
+    '--no-input',
+    ...(trimmedAccount ? ['--account', trimmedAccount] : []),
+  ]
+}
+
+function runGog(args: string[], timeout = 30000): Promise<{ stdout: string, stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(resolveGogBin(), args, {
+      encoding: 'utf8',
+      timeout,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const details = [errorMessageFrom(error), stderr.trim(), stdout.trim()]
+          .filter(Boolean)
+          .join('\n')
+        reject(new Error(details || 'gog command failed'))
+        return
+      }
+
+      resolve({ stdout, stderr })
+    })
+  })
 }
 
 function resolveReadyForSession(session: RealtimeSessionState) {
@@ -485,6 +647,495 @@ async function draftEmail(payload: QwenOmniEmailDraftRequestPayload): Promise<Qw
   return parseQwenOmniEmailDraftResponse(content)
 }
 
+async function createGmailDraft(payload: QwenOmniGmailDraftRequestPayload): Promise<QwenOmniGmailDraftResult> {
+  const content = await callQwenCompatible(payload.config, [
+    { role: 'system', content: [GMAIL_DRAFT_SYSTEM_PROMPT, localRuntimeContext()].join('\n\n') },
+    {
+      role: 'user',
+      content: [
+        payload.prompt,
+        'Create a Gmail draft from this request. Do not send it.',
+      ].join('\n\n'),
+    },
+  ])
+
+  const plan = parseQwenOmniGmailDraftPlanResponse(content)
+  const missing = uniqueNonEmpty([
+    ...plan.missing,
+    plan.to.length ? undefined : 'recipient email',
+    plan.subject ? undefined : 'subject',
+    plan.body ? undefined : 'body',
+  ])
+
+  if (missing.length > 0) {
+    return {
+      ...plan,
+      missing,
+      ok: false,
+      summary: plan.summary || `还需要补充：${missing.join('、')}`,
+      error: `Missing required Gmail draft fields: ${missing.join(', ')}`,
+    }
+  }
+
+  const args = [
+    ...gogBaseArgs(payload.account),
+    '--gmail-no-send',
+    'gmail',
+    'drafts',
+    'create',
+    '--to',
+    plan.to.join(','),
+    ...(plan.cc.length ? ['--cc', plan.cc.join(',')] : []),
+    ...(plan.bcc.length ? ['--bcc', plan.bcc.join(',')] : []),
+    '--subject',
+    plan.subject,
+    '--body',
+    plan.body,
+  ]
+  console.info('[qwen-omni:gog] creating Gmail draft', {
+    recipients: plan.to.length,
+    hasCc: plan.cc.length > 0,
+    hasBcc: plan.bcc.length > 0,
+    subject: plan.subject,
+  })
+  const { stdout, stderr } = await runGog(args)
+  const parsed = safeJsonParseUnknown(stdout)
+
+  return {
+    ...plan,
+    ok: true,
+    missing: [],
+    draftId: findNestedStringField(parsed, ['id', 'draftId', 'draft_id', 'messageId', 'message_id']),
+    webUrl: findNestedStringField(parsed, ['webUrl', 'web_url', 'url', 'link']),
+    raw: clippedRawOutput(stdout, stderr),
+  }
+}
+
+async function createCalendarEvent(payload: QwenOmniCalendarEventRequestPayload): Promise<QwenOmniCalendarEventResult> {
+  const content = await callQwenCompatible(payload.config, [
+    { role: 'system', content: [CALENDAR_EVENT_SYSTEM_PROMPT, localRuntimeContext()].join('\n\n') },
+    {
+      role: 'user',
+      content: [
+        payload.prompt,
+        'Create a Google Calendar event from this request. Do not email attendees unless the CLI explicitly does so; the app will pass send-updates=none.',
+      ].join('\n\n'),
+    },
+  ])
+
+  const plan = parseQwenOmniCalendarEventPlanResponse(content)
+  const missing = uniqueNonEmpty([
+    ...plan.missing,
+    plan.title ? undefined : 'title',
+    plan.from ? undefined : 'from',
+    plan.to ? undefined : 'to',
+  ])
+  const calendarId = payload.calendarId?.trim() || DEFAULT_CALENDAR_ID
+  const dryRun = payload.dryRun ?? /预览|先看看|dry[- ]?run|不要创建|别创建/i.test(payload.prompt)
+
+  if (missing.length > 0) {
+    return {
+      ...plan,
+      calendarId,
+      dryRun,
+      missing,
+      ok: false,
+      summary: plan.summary || `还需要补充：${missing.join('、')}`,
+      error: `Missing required calendar fields: ${missing.join(', ')}`,
+    }
+  }
+
+  const args = [
+    ...gogBaseArgs(payload.account),
+    'calendar',
+    'create',
+    calendarId,
+    '--summary',
+    plan.title,
+    '--from',
+    plan.from,
+    '--to',
+    plan.to,
+    ...(plan.timezone ? ['--start-timezone', plan.timezone, '--end-timezone', plan.timezone] : []),
+    '--send-updates',
+    'none',
+    ...(plan.description ? ['--description', plan.description] : []),
+    ...(plan.location ? ['--location', plan.location] : []),
+    ...(plan.attendees.length ? ['--attendees', plan.attendees.join(',')] : []),
+    ...(plan.withMeet ? ['--with-meet'] : []),
+    ...(dryRun ? ['--dry-run'] : []),
+  ]
+  console.info('[qwen-omni:gog] creating calendar event', {
+    calendarId,
+    title: plan.title,
+    from: plan.from,
+    to: plan.to,
+    dryRun,
+  })
+  const { stdout, stderr } = await runGog(args)
+  const parsed = safeJsonParseUnknown(stdout)
+
+  return {
+    ...plan,
+    calendarId,
+    dryRun,
+    ok: true,
+    missing: [],
+    eventId: findNestedStringField(parsed, ['id', 'eventId', 'event_id']),
+    htmlLink: findNestedStringField(parsed, ['htmlLink', 'html_link', 'link', 'url']),
+    raw: clippedRawOutput(stdout, stderr),
+  }
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function dateTimeFromGogDate(value: unknown): { value?: string, timezone?: string } {
+  if (!value || typeof value !== 'object')
+    return {}
+
+  const record = value as Record<string, unknown>
+  return {
+    value: stringFromUnknown(record.dateTime) ?? stringFromUnknown(record.date),
+    timezone: stringFromUnknown(record.timeZone),
+  }
+}
+
+function calendarEventContextFromGogRecord(record: Record<string, unknown>, calendarId: string): QwenOmniCalendarEventContext | undefined {
+  const eventId = stringFromUnknown(record.id) ?? stringFromUnknown(record.eventId) ?? stringFromUnknown(record.event_id)
+  const title = stringFromUnknown(record.summary) ?? stringFromUnknown(record.title)
+  if (!eventId || !title)
+    return undefined
+
+  const start = dateTimeFromGogDate(record.start)
+  const end = dateTimeFromGogDate(record.end)
+
+  return {
+    calendarId,
+    eventId,
+    title,
+    from: start.value,
+    to: end.value,
+    timezone: start.timezone ?? end.timezone,
+    location: stringFromUnknown(record.location),
+    description: stringFromUnknown(record.description),
+    htmlLink: stringFromUnknown(record.htmlLink) ?? stringFromUnknown(record.html_link) ?? stringFromUnknown(record.link),
+  }
+}
+
+function gogCalendarEventRecords(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value))
+    return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)))
+
+  if (!value || typeof value !== 'object')
+    return []
+
+  const record = value as Record<string, unknown>
+  const nested = record.items ?? record.events ?? record.results
+  return gogCalendarEventRecords(nested)
+}
+
+function dedupeCalendarCandidates(candidates: QwenOmniCalendarEventContext[]): QwenOmniCalendarEventContext[] {
+  const seen = new Set<string>()
+  return candidates.filter((candidate) => {
+    const key = `${candidate.calendarId}:${candidate.eventId}`
+    if (seen.has(key))
+      return false
+
+    seen.add(key)
+    return true
+  })
+}
+
+async function listCalendarActionCandidates(payload: { account?: string, calendarId?: string, recentEvent?: QwenOmniCalendarEventContext }): Promise<QwenOmniCalendarEventContext[]> {
+  const calendarId = payload.calendarId?.trim() || payload.recentEvent?.calendarId || DEFAULT_CALENDAR_ID
+  const candidates = payload.recentEvent ? [payload.recentEvent] : []
+
+  try {
+    const { stdout } = await runGog([
+      ...gogBaseArgs(payload.account),
+      'calendar',
+      'events',
+      calendarId,
+      '--from',
+      'today',
+      '--days',
+      '14',
+      '--max',
+      '20',
+    ])
+    const parsed = safeJsonParseUnknown(stdout)
+    candidates.push(...gogCalendarEventRecords(parsed)
+      .map(record => calendarEventContextFromGogRecord(record, calendarId))
+      .filter((candidate): candidate is QwenOmniCalendarEventContext => Boolean(candidate)))
+  }
+  catch (error) {
+    if (!payload.recentEvent)
+      throw error
+  }
+
+  return dedupeCalendarCandidates(candidates)
+}
+
+function simpleTitleReplacementFromPrompt(prompt: string, event?: QwenOmniCalendarEventContext): string | undefined {
+  if (!event?.title)
+    return undefined
+
+  const startIndexes = ['把', '将']
+    .map(marker => prompt.indexOf(marker))
+    .filter(index => index >= 0)
+  const startIndex = startIndexes.length ? Math.min(...startIndexes) : -1
+  const text = startIndex >= 0 ? prompt.slice(startIndex + 1) : prompt
+  const operators = ['改成', '改为', '换成', '换为']
+    .map(marker => ({ marker, index: text.indexOf(marker) }))
+    .filter(item => item.index > 0)
+    .sort((a, b) => a.index - b.index)
+  const operator = operators[0]
+  if (!operator)
+    return undefined
+
+  const from = text.slice(0, operator.index).trim()
+  const to = text
+    .slice(operator.index + operator.marker.length)
+    .trim()
+    .replace(/^人名\s*/, '')
+    .split(/[，,。.!?！？]/)[0]
+    ?.trim()
+  if (!from || !to)
+    return undefined
+
+  if (event.title.includes(from))
+    return event.title.replaceAll(from, to)
+
+  const compactTitle = event.title.replace(/\s+/g, '')
+  const compactFrom = from.replace(/\s+/g, '')
+  if (!compactFrom || !compactTitle.includes(compactFrom))
+    return undefined
+
+  return compactTitle.replaceAll(compactFrom, to)
+}
+
+async function updateCalendarEvent(payload: QwenOmniCalendarEventUpdateRequestPayload): Promise<QwenOmniCalendarEventUpdateResult> {
+  const candidates = await listCalendarActionCandidates(payload)
+  const content = await callQwenCompatible(payload.config, [
+    { role: 'system', content: [CALENDAR_EVENT_UPDATE_SYSTEM_PROMPT, localRuntimeContext()].join('\n\n') },
+    {
+      role: 'user',
+      content: [
+        payload.prompt,
+        `Default calendarId: ${payload.calendarId?.trim() || DEFAULT_CALENDAR_ID}`,
+        `recentEvent: ${JSON.stringify(payload.recentEvent ?? null)}`,
+        `candidateEvents: ${JSON.stringify(candidates)}`,
+        'Update exactly one Google Calendar event. Do not send attendee notifications; the app will pass send-updates=none.',
+      ].join('\n\n'),
+    },
+  ])
+
+  const parsedPlan = parseQwenOmniCalendarEventUpdatePlanResponse(content)
+  const calendarId = parsedPlan.calendarId || payload.recentEvent?.calendarId || payload.calendarId?.trim() || DEFAULT_CALENDAR_ID
+  const target = candidates.find(candidate => candidate.calendarId === calendarId && candidate.eventId === parsedPlan.eventId)
+    ?? payload.recentEvent
+  const title = parsedPlan.title ?? simpleTitleReplacementFromPrompt(payload.prompt, target)
+  const plan = {
+    ...parsedPlan,
+    calendarId,
+    eventId: parsedPlan.eventId || payload.recentEvent?.eventId || '',
+    title,
+  }
+  const dryRun = payload.dryRun ?? /预览|先看看|dry[- ]?run|不要修改|别修改/i.test(payload.prompt)
+  const hasUpdates = Boolean(
+    plan.title
+    || plan.from
+    || plan.to
+    || plan.location
+    || plan.description
+    || plan.attendees.length
+    || plan.addAttendees.length
+    || plan.withMeet,
+  )
+  const missing = uniqueNonEmpty([
+    ...plan.missing,
+    plan.eventId ? undefined : 'target event',
+    hasUpdates ? undefined : 'update field',
+  ])
+
+  if (missing.length > 0) {
+    return {
+      ...plan,
+      dryRun,
+      missing,
+      ok: false,
+      summary: plan.summary || `还需要补充：${missing.join('、')}`,
+      error: `Missing required calendar update fields: ${missing.join(', ')}`,
+    }
+  }
+
+  const args = [
+    ...gogBaseArgs(payload.account),
+    ...(dryRun ? ['--dry-run'] : []),
+    'calendar',
+    'update',
+    plan.calendarId,
+    plan.eventId,
+    '--send-updates',
+    'none',
+    ...(plan.title ? ['--summary', plan.title] : []),
+    ...(plan.from ? ['--from', plan.from] : []),
+    ...(plan.to ? ['--to', plan.to] : []),
+    ...(plan.timezone ? ['--start-timezone', plan.timezone, '--end-timezone', plan.timezone] : []),
+    ...(plan.description ? ['--description', plan.description] : []),
+    ...(plan.location ? ['--location', plan.location] : []),
+    ...(plan.attendees.length ? ['--attendees', plan.attendees.join(',')] : []),
+    ...(plan.addAttendees.length ? ['--add-attendee', plan.addAttendees.join(',')] : []),
+    ...(plan.withMeet ? ['--with-meet'] : []),
+  ]
+  console.info('[qwen-omni:gog] updating calendar event', {
+    calendarId: plan.calendarId,
+    eventId: plan.eventId,
+    title: plan.title,
+    dryRun,
+  })
+  const { stdout, stderr } = await runGog(args)
+  const parsed = safeJsonParseUnknown(stdout)
+
+  return {
+    ...plan,
+    ok: true,
+    dryRun,
+    missing: [],
+    htmlLink: findNestedStringField(parsed, ['htmlLink', 'html_link', 'link', 'url']) ?? target?.htmlLink,
+    raw: clippedRawOutput(stdout, stderr),
+  }
+}
+
+function localHourFromDateTime(value?: string): number | undefined {
+  if (!value)
+    return undefined
+
+  const match = value.match(/T(\d{2}):/)
+  const hour = match?.[1] ? Number.parseInt(match[1], 10) : Number.NaN
+  return Number.isFinite(hour) ? hour : undefined
+}
+
+function requestedHourFromPrompt(prompt: string): number | undefined {
+  const numericMatch = prompt.match(/(\d{1,2})\s*(?:点|:)/)
+  let hour = numericMatch?.[1] ? Number.parseInt(numericMatch[1], 10) : Number.NaN
+
+  if (!Number.isFinite(hour)) {
+    const chineseHourMap: Record<string, number> = {
+      一: 1,
+      二: 2,
+      两: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+      十: 10,
+      十一: 11,
+      十二: 12,
+    }
+    const chineseMatch = prompt.match(/(十[一二]?|[一二两三四五六七八九])\s*点/)
+    hour = chineseMatch?.[1] ? chineseHourMap[chineseMatch[1]] ?? Number.NaN : Number.NaN
+  }
+
+  if (!Number.isFinite(hour))
+    return undefined
+
+  if (/下午|晚上|今晚/.test(prompt) && hour >= 1 && hour <= 11)
+    return hour + 12
+  if (/中午/.test(prompt) && hour >= 1 && hour <= 10)
+    return hour + 12
+
+  return hour
+}
+
+function deterministicDeleteCandidate(prompt: string, candidates: QwenOmniCalendarEventContext[]): QwenOmniCalendarEventContext | undefined {
+  const requestedHour = requestedHourFromPrompt(prompt)
+  if (requestedHour === undefined)
+    return undefined
+
+  const timeMatches = candidates.filter(candidate => localHourFromDateTime(candidate.from) === requestedHour)
+  return timeMatches.length === 1 ? timeMatches[0] : undefined
+}
+
+async function deleteCalendarEvent(payload: QwenOmniCalendarEventDeleteRequestPayload): Promise<QwenOmniCalendarEventDeleteResult> {
+  const candidates = await listCalendarActionCandidates(payload)
+  const content = await callQwenCompatible(payload.config, [
+    { role: 'system', content: [CALENDAR_EVENT_DELETE_SYSTEM_PROMPT, localRuntimeContext()].join('\n\n') },
+    {
+      role: 'user',
+      content: [
+        payload.prompt,
+        `Default calendarId: ${payload.calendarId?.trim() || DEFAULT_CALENDAR_ID}`,
+        `recentEvent: ${JSON.stringify(payload.recentEvent ?? null)}`,
+        `candidateEvents: ${JSON.stringify(candidates)}`,
+        'Delete exactly one Google Calendar event. Do not send attendee notifications; the app will pass send-updates=none.',
+      ].join('\n\n'),
+    },
+  ])
+
+  const parsedPlan = parseQwenOmniCalendarEventDeletePlanResponse(content)
+  const deterministicTarget = deterministicDeleteCandidate(payload.prompt, candidates)
+  const calendarId = parsedPlan.calendarId || deterministicTarget?.calendarId || payload.calendarId?.trim() || DEFAULT_CALENDAR_ID
+  const target = candidates.find(candidate => candidate.calendarId === calendarId && candidate.eventId === parsedPlan.eventId)
+    ?? deterministicTarget
+  const plan = {
+    ...parsedPlan,
+    calendarId,
+    eventId: parsedPlan.eventId || target?.eventId || '',
+    title: parsedPlan.title || target?.title || '',
+    from: parsedPlan.from || target?.from,
+    to: parsedPlan.to || target?.to,
+  }
+  const dryRun = payload.dryRun ?? /预览|先看看|dry[- ]?run|不要删除|别删除/i.test(payload.prompt)
+  const missing = uniqueNonEmpty([
+    ...plan.missing,
+    plan.eventId ? undefined : 'target event',
+  ])
+
+  if (missing.length > 0) {
+    return {
+      ...plan,
+      dryRun,
+      missing,
+      ok: false,
+      summary: plan.summary || `我还需要你补充要删除的是哪个日程。`,
+      error: `Missing required calendar delete fields: ${missing.join(', ')}`,
+    }
+  }
+
+  const args = [
+    ...gogBaseArgs(payload.account),
+    ...(dryRun ? ['--dry-run'] : []),
+    '--force',
+    'calendar',
+    'delete',
+    plan.calendarId,
+    plan.eventId,
+    '--send-updates',
+    'none',
+  ]
+  console.info('[qwen-omni:gog] deleting calendar event', {
+    calendarId: plan.calendarId,
+    eventId: plan.eventId,
+    title: plan.title,
+    dryRun,
+  })
+  const { stdout, stderr } = await runGog(args)
+
+  return {
+    ...plan,
+    ok: true,
+    dryRun,
+    missing: [],
+    raw: clippedRawOutput(stdout, stderr),
+  }
+}
+
 function pasteWithCommandV(): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile('osascript', ['-e', 'tell application "System Events" to keystroke "v" using command down'], (error) => {
@@ -537,5 +1188,9 @@ export function createQwenOmniService(params: { context: MainEventaContext }) {
   defineInvokeHandler(params.context, qwenOmniRealtimeClose, () => closeRealtimeSession())
   defineInvokeHandler(params.context, qwenOmniGeneratePrototype, payload => generatePrototype(payload))
   defineInvokeHandler(params.context, qwenOmniDraftEmail, payload => draftEmail(payload))
+  defineInvokeHandler(params.context, qwenOmniCreateGmailDraft, payload => createGmailDraft(payload))
+  defineInvokeHandler(params.context, qwenOmniCreateCalendarEvent, payload => createCalendarEvent(payload))
+  defineInvokeHandler(params.context, qwenOmniUpdateCalendarEvent, payload => updateCalendarEvent(payload))
+  defineInvokeHandler(params.context, qwenOmniDeleteCalendarEvent, payload => deleteCalendarEvent(payload))
   defineInvokeHandler(params.context, qwenOmniPasteText, payload => pasteTextIntoFocusedInput(payload.text))
 }

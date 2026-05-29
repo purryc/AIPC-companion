@@ -1,4 +1,11 @@
-import type { QwenOmniRealtimeEvent } from '@proj-airi/stage-shared'
+import type {
+  QwenOmniCalendarEventContext,
+  QwenOmniCalendarEventDeleteResult,
+  QwenOmniCalendarEventResult,
+  QwenOmniCalendarEventUpdateResult,
+  QwenOmniCommandKind,
+  QwenOmniRealtimeEvent,
+} from '@proj-airi/stage-shared'
 import type { ChatHistoryItem } from '@proj-airi/stage-ui/types/chat'
 
 import workletUrl from '@proj-airi/stage-ui/workers/vad/process.worklet?worker&url'
@@ -16,6 +23,9 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 import {
+  qwenOmniCreateCalendarEvent,
+  qwenOmniCreateGmailDraft,
+  qwenOmniDeleteCalendarEvent,
   qwenOmniDraftEmail,
   qwenOmniGeneratePrototype,
   qwenOmniPasteText,
@@ -26,6 +36,7 @@ import {
   qwenOmniRealtimeEvent,
   qwenOmniRealtimeSendText,
   qwenOmniRealtimeStart,
+  qwenOmniUpdateCalendarEvent,
   widgetsAdd,
 } from '../../shared/eventa'
 import { calculatePcm16Rms, pcm16BytesToFloat32, schedulePcmChunk } from '../libs/qwen-omni/pcm-playback'
@@ -85,6 +96,23 @@ function isRealtimeSessionClosedError(message: string) {
   return /realtime session is not open|session is not open|socket.*not open/i.test(message)
 }
 
+function calendarContextFromCreateResult(result: QwenOmniCalendarEventResult): QwenOmniCalendarEventContext | undefined {
+  if (!result.eventId)
+    return undefined
+
+  return {
+    calendarId: result.calendarId,
+    eventId: result.eventId,
+    title: result.title,
+    from: result.from,
+    to: result.to,
+    timezone: result.timezone,
+    location: result.location,
+    description: result.description,
+    htmlLink: result.htmlLink,
+  }
+}
+
 export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omni', () => {
   const context = useElectronEventaContext()
   const startRealtime = useElectronEventaInvoke(qwenOmniRealtimeStart)
@@ -95,6 +123,10 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   const closeRealtime = useElectronEventaInvoke(qwenOmniRealtimeClose)
   const generatePrototype = useElectronEventaInvoke(qwenOmniGeneratePrototype)
   const draftEmail = useElectronEventaInvoke(qwenOmniDraftEmail)
+  const createGmailDraft = useElectronEventaInvoke(qwenOmniCreateGmailDraft)
+  const createCalendarEvent = useElectronEventaInvoke(qwenOmniCreateCalendarEvent)
+  const updateCalendarEvent = useElectronEventaInvoke(qwenOmniUpdateCalendarEvent)
+  const deleteCalendarEvent = useElectronEventaInvoke(qwenOmniDeleteCalendarEvent)
   const pasteText = useElectronEventaInvoke(qwenOmniPasteText)
   const addWidget = useElectronEventaInvoke(widgetsAdd)
 
@@ -117,6 +149,15 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   const activeOutputSources = new Set<AudioBufferSourceNode>()
   let realtimeStartPromise: Promise<void> | undefined
   let handlers: QwenOmniDemoHandlers = {}
+  let commandOverrideActive = false
+  let pendingInputTranscript = ''
+  let pendingInputTranscriptPreview = ''
+  let pendingCommandTimer: ReturnType<typeof setTimeout> | undefined
+  let lastHandledCommandKey = ''
+  let commandOverrideTimer: ReturnType<typeof setTimeout> | undefined
+  let voiceConfirmationActive = false
+  let voiceConfirmationTimer: ReturnType<typeof setTimeout> | undefined
+  let lastCalendarEvent: QwenOmniCalendarEventContext | undefined
 
   function appendHistoryMessage(message: ChatHistoryItem) {
     if (!chatSession.activeSessionId)
@@ -136,6 +177,108 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   function appendErrorNotice(message: string) {
     lastError.value = message
     appendHistoryMessage(errorHistoryMessage(message))
+  }
+
+  function normalizedCommandKey(text: string) {
+    return text.toLowerCase().replace(/\s+/g, ' ').trim()
+  }
+
+  function resolveDemoCommand(text: string): QwenOmniCommandKind {
+    const command = routeQwenOmniCommand(text)
+    if (command !== 'chat')
+      return command
+
+    if (lastCalendarEvent && /删|取消|delete|remove|cancel/i.test(text))
+      return 'calendar-delete'
+
+    if (lastCalendarEvent && /改|换|更名|修改|更新|rename|update|change/i.test(text))
+      return 'calendar-update'
+
+    return command
+  }
+
+  function hasHandledCommandText(text: string) {
+    const key = normalizedCommandKey(text)
+    return Boolean(
+      key
+      && lastHandledCommandKey
+      && (key === lastHandledCommandKey || key.includes(lastHandledCommandKey) || lastHandledCommandKey.includes(key)),
+    )
+  }
+
+  function clearPendingCommandTimer() {
+    if (!pendingCommandTimer)
+      return
+
+    clearTimeout(pendingCommandTimer)
+    pendingCommandTimer = undefined
+  }
+
+  function clearVoiceConfirmationSuppression() {
+    voiceConfirmationActive = false
+    if (!voiceConfirmationTimer)
+      return
+
+    clearTimeout(voiceConfirmationTimer)
+    voiceConfirmationTimer = undefined
+  }
+
+  function beginVoiceConfirmationSuppression() {
+    clearVoiceConfirmationSuppression()
+    voiceConfirmationActive = true
+    voiceConfirmationTimer = setTimeout(() => {
+      voiceConfirmationTimer = undefined
+      voiceConfirmationActive = false
+    }, 9000)
+  }
+
+  function clearCommandOverrideSuppression() {
+    commandOverrideActive = false
+    if (!commandOverrideTimer)
+      return
+
+    clearTimeout(commandOverrideTimer)
+    commandOverrideTimer = undefined
+  }
+
+  function beginCommandOverrideSuppression() {
+    clearCommandOverrideSuppression()
+    commandOverrideActive = true
+    commandOverrideTimer = setTimeout(() => {
+      commandOverrideTimer = undefined
+      commandOverrideActive = false
+    }, 12000)
+  }
+
+  function resetPendingInputTranscript() {
+    pendingInputTranscript = ''
+    pendingInputTranscriptPreview = ''
+    clearPendingCommandTimer()
+  }
+
+  function suppressRealtimeAssistantForCommand() {
+    beginCommandOverrideSuppression()
+    stopPlayback()
+    chatOrchestrator.sending = false
+    chatStream.resetStream()
+    void cancelRealtime().catch(() => {})
+  }
+
+  async function speakCommandConfirmation(text: string) {
+    const confirmation = text.trim()
+    if (!confirmation || !qwenConfig.configured)
+      return
+
+    beginVoiceConfirmationSuppression()
+    try {
+      await ensureRealtimeSession()
+      await sendRealtimeText({
+        text: `请只用中文说下面这句简短确认，不要添加任何内容：${confirmation}`,
+      })
+    }
+    catch {
+      clearVoiceConfirmationSuppression()
+    }
   }
 
   function ensureOutputAudioContext() {
@@ -294,6 +437,8 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
         ? '我已经把草稿写到当前输入框里，没有发送。'
         : `我把草稿放进剪贴板了，但自动粘贴失败：${pasteResult.error ?? 'Unknown error'}`
       appendAssistantNotice(`${suffix}\n\n${result.summary}`)
+      if (pasteResult.ok)
+        void speakCommandConfirmation('草稿已写好了。')
     }
     catch (error) {
       appendErrorNotice(errorMessageFrom(error) ?? 'Email draft generation failed')
@@ -303,8 +448,163 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
     }
   }
 
+  async function handleGmailDraftCommand(prompt: string) {
+    processingCommand.value = true
+    try {
+      await cancelRealtime()
+      const result = await createGmailDraft({
+        config: qwenConfig.toConfig(),
+        prompt,
+      })
+
+      if (!result.ok) {
+        appendAssistantNotice(result.summary || `我还需要你补充：${result.missing.join('、')}`)
+        return
+      }
+
+      appendAssistantNotice([
+        `我已经在 Gmail 建好草稿，没有发送。`,
+        `主题：${result.subject}`,
+        `收件人：${result.to.join(', ')}`,
+        result.cc.length ? `抄送：${result.cc.join(', ')}` : '',
+        result.webUrl ? `链接：${result.webUrl}` : '',
+      ].filter(Boolean).join('\n'))
+      void speakCommandConfirmation('邮件草稿已建好。')
+    }
+    catch (error) {
+      appendErrorNotice(errorMessageFrom(error) ?? 'Gmail draft creation failed')
+    }
+    finally {
+      processingCommand.value = false
+    }
+  }
+
+  async function handleCalendarEventCommand(prompt: string) {
+    processingCommand.value = true
+    try {
+      await cancelRealtime()
+      const result = await createCalendarEvent({
+        config: qwenConfig.toConfig(),
+        prompt,
+      })
+
+      if (!result.ok) {
+        appendAssistantNotice(result.summary || `我还需要你补充：${result.missing.join('、')}`)
+        return
+      }
+
+      lastCalendarEvent = calendarContextFromCreateResult(result) ?? lastCalendarEvent
+      appendAssistantNotice([
+        result.dryRun ? '我已经预览了这个日程，还没有写入 Calendar。' : '我已经把日程加到 Calendar 里了。',
+        `标题：${result.title}`,
+        `时间：${result.from} - ${result.to}`,
+        result.location ? `地点：${result.location}` : '',
+        result.attendees.length ? `参与人：${result.attendees.join(', ')}` : '',
+        result.withMeet ? '已请求 Google Meet 链接。' : '',
+        result.htmlLink ? `链接：${result.htmlLink}` : '',
+      ].filter(Boolean).join('\n'))
+      void speakCommandConfirmation(result.dryRun ? '日程预览好了。' : '日程已加到日历。')
+    }
+    catch (error) {
+      appendErrorNotice(errorMessageFrom(error) ?? 'Calendar event creation failed')
+    }
+    finally {
+      processingCommand.value = false
+    }
+  }
+
+  function calendarContextFromUpdateResult(result: QwenOmniCalendarEventUpdateResult): QwenOmniCalendarEventContext | undefined {
+    if (!result.eventId)
+      return undefined
+
+    const previous = lastCalendarEvent?.eventId === result.eventId ? lastCalendarEvent : undefined
+    return {
+      calendarId: result.calendarId,
+      eventId: result.eventId,
+      title: result.title ?? previous?.title ?? 'Calendar event',
+      from: result.from ?? previous?.from,
+      to: result.to ?? previous?.to,
+      timezone: result.timezone ?? previous?.timezone,
+      location: result.location ?? previous?.location,
+      description: result.description ?? previous?.description,
+      htmlLink: result.htmlLink ?? previous?.htmlLink,
+    }
+  }
+
+  async function handleCalendarUpdateCommand(prompt: string) {
+    processingCommand.value = true
+    try {
+      await cancelRealtime()
+      const result = await updateCalendarEvent({
+        config: qwenConfig.toConfig(),
+        prompt,
+        recentEvent: lastCalendarEvent,
+      })
+
+      if (!result.ok) {
+        appendAssistantNotice(result.summary || `我还需要你补充：${result.missing.join('、')}`)
+        return
+      }
+
+      lastCalendarEvent = calendarContextFromUpdateResult(result) ?? lastCalendarEvent
+      appendAssistantNotice([
+        result.dryRun ? '我已经预览了 Calendar 修改，还没有写入。' : '我已经更新 Calendar 事件。',
+        result.title ? `标题：${result.title}` : '',
+        result.from && result.to ? `时间：${result.from} - ${result.to}` : '',
+        result.location ? `地点：${result.location}` : '',
+        result.addAttendees.length ? `新增参与人：${result.addAttendees.join(', ')}` : '',
+        result.attendees.length ? `参与人：${result.attendees.join(', ')}` : '',
+        result.withMeet ? '已请求 Google Meet 链接。' : '',
+        result.htmlLink ? `链接：${result.htmlLink}` : '',
+      ].filter(Boolean).join('\n'))
+      void speakCommandConfirmation(result.dryRun ? '日程修改预览好了。' : '日程已更新。')
+    }
+    catch (error) {
+      appendErrorNotice(errorMessageFrom(error) ?? 'Calendar event update failed')
+    }
+    finally {
+      processingCommand.value = false
+    }
+  }
+
+  function clearDeletedCalendarContext(result: QwenOmniCalendarEventDeleteResult) {
+    if (lastCalendarEvent?.eventId === result.eventId)
+      lastCalendarEvent = undefined
+  }
+
+  async function handleCalendarDeleteCommand(prompt: string) {
+    processingCommand.value = true
+    try {
+      await cancelRealtime()
+      const result = await deleteCalendarEvent({
+        config: qwenConfig.toConfig(),
+        prompt,
+        recentEvent: lastCalendarEvent,
+      })
+
+      if (!result.ok) {
+        appendAssistantNotice(result.summary || `我还需要你补充：${result.missing.join('、')}`)
+        return
+      }
+
+      clearDeletedCalendarContext(result)
+      appendAssistantNotice([
+        result.dryRun ? '我已经预览了 Calendar 删除，还没有执行。' : '我已经从 Calendar 删除这个事件。',
+        result.title ? `标题：${result.title}` : '',
+        result.from && result.to ? `时间：${result.from} - ${result.to}` : '',
+      ].filter(Boolean).join('\n'))
+      void speakCommandConfirmation(result.dryRun ? '日程删除预览好了。' : '日程已删除。')
+    }
+    catch (error) {
+      appendErrorNotice(errorMessageFrom(error) ?? 'Calendar event delete failed')
+    }
+    finally {
+      processingCommand.value = false
+    }
+  }
+
   async function handleDemoCommand(text: string) {
-    const command = routeQwenOmniCommand(text)
+    const command = resolveDemoCommand(text)
     if (command === 'prototype') {
       await handlePrototypeCommand(text)
       return true
@@ -315,13 +615,71 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
       return true
     }
 
+    if (command === 'gmail-draft') {
+      await handleGmailDraftCommand(text)
+      return true
+    }
+
+    if (command === 'calendar-event') {
+      await handleCalendarEventCommand(text)
+      return true
+    }
+
+    if (command === 'calendar-delete') {
+      await handleCalendarDeleteCommand(text)
+      return true
+    }
+
+    if (command === 'calendar-update') {
+      await handleCalendarUpdateCommand(text)
+      return true
+    }
+
     return false
+  }
+
+  async function runTranscriptCommand(text: string) {
+    const finalText = text.trim()
+    if (!finalText || hasHandledCommandText(finalText))
+      return
+
+    lastHandledCommandKey = normalizedCommandKey(finalText)
+    appendHistoryMessage(userMessage(finalText))
+    try {
+      postCaption({ type: 'caption-speaker', text: finalText })
+    }
+    catch {}
+
+    await handleDemoCommand(finalText)
+  }
+
+  function scheduleTranscriptCommand(text: string, delayMs = 500) {
+    const finalText = text.trim()
+    if (!finalText || resolveDemoCommand(finalText) === 'chat' || hasHandledCommandText(finalText))
+      return
+
+    suppressRealtimeAssistantForCommand()
+    clearPendingCommandTimer()
+    pendingCommandTimer = setTimeout(() => {
+      pendingCommandTimer = undefined
+      void runTranscriptCommand(finalText)
+    }, delayMs)
   }
 
   async function handleInputTranscript(text: string) {
     const finalText = text.trim()
     if (!finalText)
       return
+
+    if (hasHandledCommandText(finalText))
+      return
+
+    if (resolveDemoCommand(finalText) !== 'chat') {
+      clearPendingCommandTimer()
+      suppressRealtimeAssistantForCommand()
+      await runTranscriptCommand(finalText)
+      return
+    }
 
     appendHistoryMessage(userMessage(finalText))
     try {
@@ -333,7 +691,24 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   }
 
   function handleTextDelta(text: string) {
+    if (commandOverrideActive || voiceConfirmationActive)
+      return
+
     if (!text)
+      return
+
+    const currentText = typeof chatStream.streamingMessage.content === 'string'
+      ? chatStream.streamingMessage.content
+      : ''
+    let nextText = text
+    if (currentText) {
+      if (text.startsWith(currentText))
+        nextText = text.slice(currentText.length)
+      else if (currentText.trim() === text.trim() || (text.length > 8 && currentText.endsWith(text)))
+        return
+    }
+
+    if (!nextText)
       return
 
     if (!chatOrchestrator.sending) {
@@ -341,9 +716,9 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
       chatStream.beginStream()
     }
 
-    chatStream.appendStreamLiteral(text)
+    chatStream.appendStreamLiteral(nextText)
     try {
-      postCaption({ type: 'caption-assistant', text })
+      postCaption({ type: 'caption-assistant', text: nextText })
     }
     catch {}
   }
@@ -358,13 +733,25 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
         lastError.value = ''
         return
       case 'speech-started':
+        resetPendingInputTranscript()
+        lastHandledCommandKey = ''
+        clearCommandOverrideSuppression()
+        clearVoiceConfirmationSuppression()
         stopPlayback()
         void cancelRealtime()
         return
+      case 'speech-stopped':
+        scheduleTranscriptCommand(pendingInputTranscriptPreview || pendingInputTranscript, 450)
+        return
       case 'input-transcript':
+        pendingInputTranscript = event.text
+        pendingInputTranscriptPreview = event.text
         void handleInputTranscript(event.text)
         return
       case 'response-created':
+        if (commandOverrideActive || voiceConfirmationActive)
+          return
+
         chatOrchestrator.sending = true
         chatStream.beginStream()
         return
@@ -375,10 +762,26 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
         playPcm16(event.pcm16, event.sampleRate)
         return
       case 'response-done':
+        if (voiceConfirmationActive) {
+          clearVoiceConfirmationSuppression()
+          chatStream.resetStream()
+          chatOrchestrator.sending = false
+          return
+        }
+
+        if (commandOverrideActive) {
+          clearCommandOverrideSuppression()
+          chatStream.resetStream()
+          chatOrchestrator.sending = false
+          return
+        }
+
         chatStream.finalizeStream()
         chatOrchestrator.sending = false
         return
       case 'error':
+        clearCommandOverrideSuppression()
+        clearVoiceConfirmationSuppression()
         lastError.value = event.message
         sessionActive.value = false
         connecting.value = false
@@ -387,10 +790,13 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
         chatOrchestrator.sending = false
         break
       case 'debug':
-      case 'speech-stopped':
         break
       case 'input-transcript-delta':
         try {
+          if (event.text)
+            pendingInputTranscript += event.text
+          pendingInputTranscriptPreview = `${pendingInputTranscript}${event.stash}`.trim()
+          scheduleTranscriptCommand(pendingInputTranscriptPreview || pendingInputTranscript, 700)
           const preview = `${event.text}${event.stash}`.trim()
           if (preview)
             postCaption({ type: 'caption-speaker', text: preview })
@@ -470,6 +876,10 @@ export const useTamagotchiQwenOmniStore = defineStore('stage-tamagotchi:qwen-omn
   async function stopQwenOmniConversation() {
     sessionActive.value = false
     connecting.value = false
+    commandOverrideActive = false
+    clearCommandOverrideSuppression()
+    resetPendingInputTranscript()
+    clearVoiceConfirmationSuppression()
     stopPlayback()
     await cleanupInputAudio()
     await closeRealtime()

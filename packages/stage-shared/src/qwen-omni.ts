@@ -2,7 +2,7 @@ export type QwenOmniRegion = 'intl-singapore' | 'cn-beijing'
 
 export type QwenOmniConversationMode = 'classic' | 'qwen-omni'
 
-export type QwenOmniCommandKind = 'chat' | 'prototype' | 'email'
+export type QwenOmniCommandKind = 'chat' | 'prototype' | 'email' | 'gmail-draft' | 'calendar-event' | 'calendar-update' | 'calendar-delete'
 
 export interface QwenOmniConfig {
   apiKey: string
@@ -89,6 +89,132 @@ export interface QwenOmniEmailDraftRequestPayload {
   imageDataUrl: string
 }
 
+export interface QwenOmniGmailDraftPlan {
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  subject: string
+  body: string
+  summary: string
+  missing: string[]
+}
+
+export interface QwenOmniGmailDraftRequestPayload {
+  config: QwenOmniConfig
+  prompt: string
+  account?: string
+}
+
+export interface QwenOmniGmailDraftResult extends QwenOmniGmailDraftPlan {
+  ok: boolean
+  draftId?: string
+  webUrl?: string
+  raw?: string
+  error?: string
+}
+
+export interface QwenOmniCalendarEventPlan {
+  title: string
+  from: string
+  to: string
+  timezone: string
+  attendees: string[]
+  location?: string
+  description?: string
+  withMeet: boolean
+  summary: string
+  missing: string[]
+}
+
+export interface QwenOmniCalendarEventRequestPayload {
+  config: QwenOmniConfig
+  prompt: string
+  account?: string
+  calendarId?: string
+  dryRun?: boolean
+}
+
+export interface QwenOmniCalendarEventResult extends QwenOmniCalendarEventPlan {
+  ok: boolean
+  calendarId: string
+  dryRun: boolean
+  eventId?: string
+  htmlLink?: string
+  raw?: string
+  error?: string
+}
+
+export interface QwenOmniCalendarEventContext {
+  calendarId: string
+  eventId: string
+  title: string
+  from?: string
+  to?: string
+  timezone?: string
+  location?: string
+  description?: string
+  htmlLink?: string
+}
+
+export interface QwenOmniCalendarEventUpdatePlan {
+  calendarId: string
+  eventId: string
+  title?: string
+  from?: string
+  to?: string
+  timezone?: string
+  location?: string
+  description?: string
+  attendees: string[]
+  addAttendees: string[]
+  withMeet?: boolean
+  summary: string
+  missing: string[]
+}
+
+export interface QwenOmniCalendarEventUpdateRequestPayload {
+  config: QwenOmniConfig
+  prompt: string
+  account?: string
+  calendarId?: string
+  recentEvent?: QwenOmniCalendarEventContext
+  dryRun?: boolean
+}
+
+export interface QwenOmniCalendarEventUpdateResult extends QwenOmniCalendarEventUpdatePlan {
+  ok: boolean
+  dryRun: boolean
+  htmlLink?: string
+  raw?: string
+  error?: string
+}
+
+export interface QwenOmniCalendarEventDeletePlan {
+  calendarId: string
+  eventId: string
+  title: string
+  from?: string
+  to?: string
+  summary: string
+  missing: string[]
+}
+
+export interface QwenOmniCalendarEventDeleteRequestPayload {
+  config: QwenOmniConfig
+  prompt: string
+  account?: string
+  calendarId?: string
+  recentEvent?: QwenOmniCalendarEventContext
+  dryRun?: boolean
+}
+
+export interface QwenOmniCalendarEventDeleteResult extends QwenOmniCalendarEventDeletePlan {
+  ok: boolean
+  dryRun: boolean
+  raw?: string
+  error?: string
+}
+
 export interface QwenOmniPasteTextPayload {
   text: string
 }
@@ -131,15 +257,112 @@ const PROTOTYPE_KEYWORDS = [
   'sketch',
 ]
 
-const EMAIL_KEYWORDS = [
+const SCREEN_EMAIL_KEYWORDS = [
   '看这封邮件',
   '帮我回复',
   '写到这里',
   '写封回复',
   '回复这封',
-  'gmail',
+  'reply this',
+  'email reply',
+  'gmail reply',
+]
+
+const GMAIL_DRAFT_KEYWORDS = [
+  '写邮件',
+  '写封邮件',
+  '帮我写邮件',
+  '邮件草稿',
+  '创建邮件草稿',
+  '发邮件',
+  '发一封邮件',
+  'compose email',
+  'email draft',
+  'write an email',
+  'draft an email',
+]
+
+const CALENDAR_EVENT_KEYWORDS = [
+  '加日程',
+  '创建日程',
+  '加到日历',
+  '写到日历',
+  '安排会议',
+  '创建会议',
+  '日历',
+  '会议',
+  '约会',
+  'calendar',
+  'schedule',
+  'meeting',
+  'create event',
+]
+
+const CALENDAR_UPDATE_KEYWORDS = [
+  '修改日程',
+  '编辑日程',
+  '更新日程',
+  '改日程',
+  '修改日历',
+  '编辑日历',
+  '更新日历',
+  '修改会议',
+  '编辑会议',
+  '更新会议',
+  '改会议',
+  '改一下日程',
+  '改一下会议',
+  'rename event',
+  'update event',
+  'edit event',
+  'change event',
+  'update calendar',
+  'edit calendar',
+]
+
+const CALENDAR_DELETE_KEYWORDS = [
+  '删除日程',
+  '删掉日程',
+  '取消日程',
+  '删除会议',
+  '删掉会议',
+  '取消会议',
+  '删除约会',
+  '删掉约会',
+  '取消约会',
+  'delete event',
+  'remove event',
+  'delete meeting',
+  'remove meeting',
+  'cancel meeting',
+]
+
+const NON_CALENDAR_REWRITE_KEYWORDS = [
+  '句子',
+  '文案',
+  '文本',
+  '代码',
+  '邮件',
+  '草稿',
+  '翻译',
+  'english',
   'email',
   'reply',
+]
+
+const NON_CALENDAR_DELETE_KEYWORDS = [
+  '句子',
+  '文案',
+  '文本',
+  '代码',
+  '邮件',
+  '草稿',
+  '消息',
+  '记录',
+  'file',
+  'email',
+  'draft',
+  'message',
 ]
 
 export function resolveQwenOmniEndpoints(region: QwenOmniRegion): QwenOmniEndpointConfig {
@@ -173,8 +396,38 @@ export function routeQwenOmniCommand(text: string): QwenOmniCommandKind {
   if (PROTOTYPE_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
     return 'prototype'
 
-  if (EMAIL_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
+  if (SCREEN_EMAIL_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
     return 'email'
+
+  if (CALENDAR_DELETE_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
+    return 'calendar-delete'
+
+  if (
+    /删|取消|delete|remove|cancel/i.test(normalized)
+    && (
+      /日程|日历|会议|约会|calendar|event|meeting|schedule/i.test(normalized)
+      || /(?:今天|明天|后天|上午|中午|下午|晚上|今晚|\d+\s*点|[一二三四五六七八九十两]+\s*点).{0,12}会/.test(normalized)
+    )
+    && !NON_CALENDAR_DELETE_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase()))
+  ) {
+    return 'calendar-delete'
+  }
+
+  if (CALENDAR_UPDATE_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
+    return 'calendar-update'
+
+  if (
+    /(?:把|将).{1,40}(?:改成|改为|换成|换为).{1,40}/.test(normalized)
+    && !NON_CALENDAR_REWRITE_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase()))
+  ) {
+    return 'calendar-update'
+  }
+
+  if (CALENDAR_EVENT_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
+    return 'calendar-event'
+
+  if (GMAIL_DRAFT_KEYWORDS.some(keyword => normalized.includes(keyword.toLowerCase())))
+    return 'gmail-draft'
 
   return 'chat'
 }
@@ -305,6 +558,25 @@ function stringArrayField(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim())
 }
 
+function stringListField(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key]
+  if (Array.isArray(value))
+    return stringArrayField(value)
+
+  if (typeof value !== 'string')
+    return []
+
+  return value
+    .split(/[,;，；\n]/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function booleanField(record: Record<string, unknown>, key: string, fallback = false): boolean {
+  const value = record[key]
+  return typeof value === 'boolean' ? value : fallback
+}
+
 function parsePrototypeSpec(value: unknown, fallbackTitle: string): QwenOmniPrototypeSpec {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const screensValue = Array.isArray(record.screens) ? record.screens : []
@@ -351,5 +623,70 @@ export function parseQwenOmniEmailDraftResponse(text: string): QwenOmniEmailDraf
     subject: stringField(record, 'subject') || undefined,
     summary: stringField(record, 'summary'),
     draft,
+  }
+}
+
+export function parseQwenOmniGmailDraftPlanResponse(text: string): QwenOmniGmailDraftPlan {
+  const record = parseObjectFromJsonText(text)
+
+  return {
+    to: stringListField(record, 'to'),
+    cc: stringListField(record, 'cc'),
+    bcc: stringListField(record, 'bcc'),
+    subject: stringField(record, 'subject'),
+    body: stringField(record, 'body'),
+    summary: stringField(record, 'summary'),
+    missing: stringListField(record, 'missing'),
+  }
+}
+
+export function parseQwenOmniCalendarEventPlanResponse(text: string): QwenOmniCalendarEventPlan {
+  const record = parseObjectFromJsonText(text)
+
+  return {
+    title: stringField(record, 'title'),
+    from: stringField(record, 'from'),
+    to: stringField(record, 'to'),
+    timezone: stringField(record, 'timezone'),
+    attendees: stringListField(record, 'attendees'),
+    location: stringField(record, 'location') || undefined,
+    description: stringField(record, 'description') || undefined,
+    withMeet: booleanField(record, 'withMeet'),
+    summary: stringField(record, 'summary'),
+    missing: stringListField(record, 'missing'),
+  }
+}
+
+export function parseQwenOmniCalendarEventUpdatePlanResponse(text: string): QwenOmniCalendarEventUpdatePlan {
+  const record = parseObjectFromJsonText(text)
+
+  return {
+    calendarId: stringField(record, 'calendarId'),
+    eventId: stringField(record, 'eventId'),
+    title: stringField(record, 'title') || undefined,
+    from: stringField(record, 'from') || undefined,
+    to: stringField(record, 'to') || undefined,
+    timezone: stringField(record, 'timezone') || undefined,
+    location: stringField(record, 'location') || undefined,
+    description: stringField(record, 'description') || undefined,
+    attendees: stringListField(record, 'attendees'),
+    addAttendees: stringListField(record, 'addAttendees'),
+    withMeet: booleanField(record, 'withMeet') || undefined,
+    summary: stringField(record, 'summary'),
+    missing: stringListField(record, 'missing'),
+  }
+}
+
+export function parseQwenOmniCalendarEventDeletePlanResponse(text: string): QwenOmniCalendarEventDeletePlan {
+  const record = parseObjectFromJsonText(text)
+
+  return {
+    calendarId: stringField(record, 'calendarId'),
+    eventId: stringField(record, 'eventId'),
+    title: stringField(record, 'title'),
+    from: stringField(record, 'from') || undefined,
+    to: stringField(record, 'to') || undefined,
+    summary: stringField(record, 'summary'),
+    missing: stringListField(record, 'missing'),
   }
 }

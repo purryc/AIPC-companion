@@ -2,8 +2,16 @@ import type { Locale } from '@intlify/core'
 import type { ServerOptions } from '@proj-airi/server-runtime/server'
 import type {
   QwenOmniAudioPayload,
+  QwenOmniCalendarEventDeleteRequestPayload,
+  QwenOmniCalendarEventDeleteResult,
+  QwenOmniCalendarEventRequestPayload,
+  QwenOmniCalendarEventResult,
+  QwenOmniCalendarEventUpdateRequestPayload,
+  QwenOmniCalendarEventUpdateResult,
   QwenOmniEmailDraftRequestPayload,
   QwenOmniEmailDraftResult,
+  QwenOmniGmailDraftRequestPayload,
+  QwenOmniGmailDraftResult,
   QwenOmniImagePayload,
   QwenOmniPasteTextPayload,
   QwenOmniPasteTextResult,
@@ -292,6 +300,10 @@ export const qwenOmniRealtimeCancel = defineInvokeEventa<void>('eventa:invoke:el
 export const qwenOmniRealtimeClose = defineInvokeEventa<void>('eventa:invoke:electron:qwen-omni:realtime:close')
 export const qwenOmniGeneratePrototype = defineInvokeEventa<QwenOmniPrototypeResult, QwenOmniPrototypeRequestPayload>('eventa:invoke:electron:qwen-omni:prototype:generate')
 export const qwenOmniDraftEmail = defineInvokeEventa<QwenOmniEmailDraftResult, QwenOmniEmailDraftRequestPayload>('eventa:invoke:electron:qwen-omni:email:draft')
+export const qwenOmniCreateGmailDraft = defineInvokeEventa<QwenOmniGmailDraftResult, QwenOmniGmailDraftRequestPayload>('eventa:invoke:electron:qwen-omni:gog:gmail-draft')
+export const qwenOmniCreateCalendarEvent = defineInvokeEventa<QwenOmniCalendarEventResult, QwenOmniCalendarEventRequestPayload>('eventa:invoke:electron:qwen-omni:gog:calendar-event')
+export const qwenOmniUpdateCalendarEvent = defineInvokeEventa<QwenOmniCalendarEventUpdateResult, QwenOmniCalendarEventUpdateRequestPayload>('eventa:invoke:electron:qwen-omni:gog:calendar-update')
+export const qwenOmniDeleteCalendarEvent = defineInvokeEventa<QwenOmniCalendarEventDeleteResult, QwenOmniCalendarEventDeleteRequestPayload>('eventa:invoke:electron:qwen-omni:gog:calendar-delete')
 export const qwenOmniPasteText = defineInvokeEventa<QwenOmniPasteTextResult, QwenOmniPasteTextPayload>('eventa:invoke:electron:qwen-omni:paste-text')
 export const qwenOmniRealtimeEvent = defineEventa<QwenOmniRealtimeEvent>('eventa:event:electron:qwen-omni:realtime')
 

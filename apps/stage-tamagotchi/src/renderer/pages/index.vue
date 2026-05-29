@@ -25,6 +25,9 @@ import { WidgetStage } from '@proj-airi/stage-ui/components/scenes'
 import { useAudioRecorder } from '@proj-airi/stage-ui/composables/audio/audio-recorder'
 import { useCanvasPixelIsTransparentAtPoint } from '@proj-airi/stage-ui/composables/canvas-alpha'
 import { useVAD } from '@proj-airi/stage-ui/stores/ai/models/vad'
+import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
+import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
+import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
 import { useHearingSpeechInputPipeline } from '@proj-airi/stage-ui/stores/modules/hearing'
 import { useQwenOmniStore } from '@proj-airi/stage-ui/stores/modules/qwen-omni'
 import { useOnboardingStore } from '@proj-airi/stage-ui/stores/onboarding'
@@ -244,7 +247,13 @@ const hearingPipeline = useHearingSpeechInputPipeline()
 const { transcribeForRecording, transcribeForMediaStream, stopStreamingTranscription } = hearingPipeline
 const { supportsStreamInput } = storeToRefs(hearingPipeline)
 const chatSyncStore = useChatSyncStore()
+const chatSessionStore = useChatSessionStore()
+const chatStreamStore = useChatStreamStore()
+const chatOrchestratorStore = useChatOrchestratorStore()
 const qwenOmniConfigStore = useQwenOmniStore()
+const { messages: chatMessages } = storeToRefs(chatSessionStore)
+const { streamingMessage } = storeToRefs(chatStreamStore)
+const { sending: chatSending } = storeToRefs(chatOrchestratorStore)
 const { qwenOmniModeEnabled } = storeToRefs(qwenOmniConfigStore)
 const qwenOmniRuntimeStore = useTamagotchiQwenOmniStore()
 const shouldUseStreamInput = computed(() => !qwenOmniModeEnabled.value && supportsStreamInput.value && !!stream.value)
@@ -264,12 +273,88 @@ const { init: initVAD, dispose: disposeVAD, start: startVAD, loaded: vadLoaded }
 
 let stopOnStopRecord: (() => void) | undefined
 const audioInteractionStarting = ref(false)
+const rpgDialogueText = ref('')
+const rpgDialogueVisible = ref(false)
+let rpgDialogueHideTimer: ReturnType<typeof setTimeout> | undefined
 
 // Caption overlay broadcast channel
 type CaptionChannelEvent
   = | { type: 'caption-speaker', text: string }
     | { type: 'caption-assistant', text: string }
 const { post: postCaption } = useBroadcastChannel<CaptionChannelEvent, CaptionChannelEvent>({ name: 'airi-caption-overlay' })
+
+function textFromChatContent(content: unknown): string {
+  if (typeof content === 'string')
+    return content
+
+  if (!Array.isArray(content))
+    return ''
+
+  return content.map((part) => {
+    if (typeof part === 'string')
+      return part
+
+    if (!part || typeof part !== 'object')
+      return ''
+
+    const record = part as Record<string, unknown>
+    return record.type === 'text' && typeof record.text === 'string' ? record.text : ''
+  }).join('')
+}
+
+const latestAssistantMessageText = computed(() => {
+  for (let index = chatMessages.value.length - 1; index >= 0; index -= 1) {
+    const message = chatMessages.value[index] as unknown
+    if (!message || typeof message !== 'object')
+      continue
+
+    const record = message as Record<string, unknown>
+    if (record.role !== 'assistant')
+      continue
+
+    const text = textFromChatContent(record.content).trim()
+    if (text)
+      return text
+  }
+
+  return ''
+})
+
+const activeAssistantDialogueText = computed(() => {
+  const streamingText = textFromChatContent(streamingMessage.value.content).trim()
+  return streamingText || latestAssistantMessageText.value
+})
+
+function scheduleRpgDialogueHide() {
+  if (rpgDialogueHideTimer)
+    clearTimeout(rpgDialogueHideTimer)
+
+  rpgDialogueHideTimer = setTimeout(() => {
+    if (chatSending.value)
+      return
+
+    rpgDialogueVisible.value = false
+  }, 18_000)
+}
+
+watch(activeAssistantDialogueText, (text) => {
+  if (!text)
+    return
+
+  rpgDialogueText.value = text
+  rpgDialogueVisible.value = true
+  scheduleRpgDialogueHide()
+})
+
+watch(chatSending, (sending) => {
+  if (sending) {
+    rpgDialogueVisible.value = true
+    return
+  }
+
+  if (rpgDialogueText.value)
+    scheduleRpgDialogueHide()
+})
 
 function waitForVideoFrame(video: HTMLVideoElement) {
   if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0)
@@ -505,6 +590,8 @@ onUnmounted(() => {
     type: 'owner-gone',
     ownerInstanceId: modelSettingsRuntimeOwnerInstanceId,
   })
+  if (rpgDialogueHideTimer)
+    clearTimeout(rpgDialogueHideTimer)
   qwenScreenCapture.cleanup()
   stopAudioInteraction()
 })
@@ -588,6 +675,37 @@ const cursorPosition = computed(() => ({
           :cursor-position="cursorPosition"
           :paused="stagePaused"
         />
+        <Transition
+          enter-active-class="transition duration-180 ease-out"
+          enter-from-class="translate-y-2 opacity-0"
+          enter-to-class="translate-y-0 opacity-100"
+          leave-active-class="transition duration-160 ease-in"
+          leave-from-class="translate-y-0 opacity-100"
+          leave-to-class="translate-y-2 opacity-0"
+        >
+          <div
+            v-if="rpgDialogueVisible && rpgDialogueText"
+            class="pointer-events-none absolute bottom-4 left-1/2 z-40 w-[min(92vw,420px)] select-none -translate-x-1/2"
+          >
+            <div class="relative">
+              <div class="absolute left-1/2 top-0 h-4 w-4 rotate-45 border-l border-t border-white/85 bg-white/92 -translate-x-1/2 -translate-y-1/2 dark:border-neutral-700/75 dark:bg-neutral-950/90" />
+              <div
+                :class="[
+                  'relative max-h-[30vh] overflow-hidden rounded-lg border border-white/80 px-4 py-3',
+                  'bg-white/92 text-neutral-900 shadow-[0_12px_40px_rgba(15,23,42,0.22)] backdrop-blur-xl',
+                  'dark:border-neutral-700/75 dark:bg-neutral-950/90 dark:text-neutral-50',
+                ]"
+              >
+                <div class="mb-1 text-[11px] text-primary-600 font-600 tracking-[0] uppercase dark:text-primary-300">
+                  AIRI
+                </div>
+                <div class="whitespace-pre-wrap break-words text-[15px] leading-[1.45]">
+                  {{ rpgDialogueText }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </Transition>
         <HoloCoupon />
         <ControlsIsland
           ref="controlsIslandRef"

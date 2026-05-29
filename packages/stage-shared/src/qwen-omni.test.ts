@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   normalizeQwenOmniConfig,
+  parseQwenOmniCalendarEventDeletePlanResponse,
+  parseQwenOmniCalendarEventPlanResponse,
+  parseQwenOmniCalendarEventUpdatePlanResponse,
   parseQwenOmniEmailDraftResponse,
+  parseQwenOmniGmailDraftPlanResponse,
   parseQwenOmniPrototypeResponse,
   parseQwenOmniRealtimeProviderEvent,
   QWEN_OMNI_DEFAULT_CONFIG,
@@ -40,6 +44,14 @@ describe('qwen omni shared helpers', () => {
   it('routes deterministic demo commands before normal chat', () => {
     expect(routeQwenOmniCommand('你看这个草图，帮我生成原型')).toBe('prototype')
     expect(routeQwenOmniCommand('看这封邮件，帮我回复并写到这里')).toBe('email')
+    expect(routeQwenOmniCommand('帮我写邮件给 alex@example.com 说明今天会晚点回复')).toBe('gmail-draft')
+    expect(routeQwenOmniCommand('帮我明天下午三点加日程，和 alex@example.com 开会')).toBe('calendar-event')
+    expect(routeQwenOmniCommand('帮我修改会议标题，把 A 大改成 Ada')).toBe('calendar-update')
+    expect(routeQwenOmniCommand('把 A 大换为人名 Ada')).toBe('calendar-update')
+    expect(routeQwenOmniCommand('把下午5点的会删了')).toBe('calendar-delete')
+    expect(routeQwenOmniCommand('删除明天三点的会议')).toBe('calendar-delete')
+    expect(routeQwenOmniCommand('把这句文案改成英文')).toBe('chat')
+    expect(routeQwenOmniCommand('把这句文案删了')).toBe('chat')
     expect(routeQwenOmniCommand('今天我们聊点轻松的')).toBe('chat')
   })
 
@@ -73,6 +85,39 @@ describe('qwen omni shared helpers', () => {
     const parsed = parseQwenOmniEmailDraftResponse('{"subject":"Re: Demo","summary":"Positive reply","draft":"Thanks, I can join tomorrow."}')
     expect(parsed.subject).toBe('Re: Demo')
     expect(parsed.draft).toContain('tomorrow')
+  })
+
+  it('parses Gmail draft plan JSON', () => {
+    const parsed = parseQwenOmniGmailDraftPlanResponse('{"to":["alex@example.com"],"cc":"","bcc":[],"subject":"Quick update","body":"I will reply later today.","summary":"Draft a short update.","missing":[]}')
+    expect(parsed.to).toEqual(['alex@example.com'])
+    expect(parsed.cc).toEqual([])
+    expect(parsed.subject).toBe('Quick update')
+    expect(parsed.body).toContain('reply later')
+  })
+
+  it('parses calendar event plan JSON', () => {
+    const parsed = parseQwenOmniCalendarEventPlanResponse('{"title":"Project sync","from":"2026-05-30T15:00:00-04:00","to":"2026-05-30T15:30:00-04:00","timezone":"America/Toronto","attendees":["alex@example.com"],"location":"Google Meet","description":"Discuss prototype.","withMeet":true,"summary":"Create a 30-minute sync.","missing":[]}')
+    expect(parsed.title).toBe('Project sync')
+    expect(parsed.attendees).toEqual(['alex@example.com'])
+    expect(parsed.withMeet).toBe(true)
+    expect(parsed.from).toContain('2026-05-30T15:00:00')
+  })
+
+  it('parses calendar event update plan JSON', () => {
+    const parsed = parseQwenOmniCalendarEventUpdatePlanResponse('{"calendarId":"primary","eventId":"event-1","title":"Meeting with Ada","from":"","to":"","timezone":"America/Toronto","location":"","description":"","attendees":[],"addAttendees":[],"withMeet":false,"summary":"Rename the meeting.","missing":[]}')
+    expect(parsed.calendarId).toBe('primary')
+    expect(parsed.eventId).toBe('event-1')
+    expect(parsed.title).toBe('Meeting with Ada')
+    expect(parsed.attendees).toEqual([])
+    expect(parsed.withMeet).toBeUndefined()
+  })
+
+  it('parses calendar event delete plan JSON', () => {
+    const parsed = parseQwenOmniCalendarEventDeletePlanResponse('{"calendarId":"primary","eventId":"event-1","title":"A meeting","from":"2026-05-29T17:00:00-04:00","to":"2026-05-29T18:00:00-04:00","summary":"Delete the 5pm meeting.","missing":[]}')
+    expect(parsed.calendarId).toBe('primary')
+    expect(parsed.eventId).toBe('event-1')
+    expect(parsed.title).toBe('A meeting')
+    expect(parsed.from).toContain('17:00:00')
   })
 
   it('parses realtime provider lifecycle and delta events', () => {
